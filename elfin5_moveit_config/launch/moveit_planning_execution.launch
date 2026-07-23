@@ -8,9 +8,13 @@
   <arg name="publish_monitored_planning_scene" value="true" />
  </include>
  # The visualization component of MoveIt!
- <arg name="display" default="true"/>
+ <arg name="display" default="false"/>
+ <arg name="rviz_config" default="$(find elfin5_moveit_config)/launch/moveit_low_load.rviz"/>
+ <arg name="rviz_egl" default="false"/>
  <include file="$(find elfin5_moveit_config)/launch/moveit_rviz.launch" if="$(arg display)">
    <arg name="config" value="true"/>
+   <arg name="config_file" value="$(arg rviz_config)"/>
+   <arg name="use_egl" value="$(arg rviz_egl)"/>
  </include>
  
 </launch>

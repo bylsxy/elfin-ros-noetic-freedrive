@@ -8,6 +8,15 @@
   <!-- By default, we are not in debug mode -->
   <arg name="debug" default="false" />
 
+  <!-- Keep the fake MoveIt stack usable without opening RViz.  This is useful
+       on Jetson when the camera and dashboard are being tested together. -->
+  <arg name="display" default="true" />
+  <arg name="rviz_config" default="$(find elfin5_moveit_config)/launch/moveit_low_load.rviz" />
+  <arg name="rviz_egl" default="false" />
+  <arg name="enable_octomap" default="false" />
+  <arg name="move_group_package" default="moveit_ros_move_group" />
+  <arg name="move_group_executable" default="move_group" />
+
   <!-- Load the URDF, SRDF and other .yaml configuration files on the param server -->
   <include file="$(find elfin5_moveit_config)/launch/planning_context.launch">
     <arg name="load_robot_description" value="true"/>
@@ -19,6 +28,7 @@
   <!-- We do not have a robot connected, so publish fake joint states -->
   <node name="joint_state_publisher" pkg="joint_state_publisher" type="joint_state_publisher">
     <param name="/use_gui" value="false"/>
+    <param name="rate" value="30"/>
     <rosparam param="/source_list">[/move_group/fake_controller_joint_states]</rosparam>
   </node>
 
@@ -29,14 +39,19 @@
   <include file="$(find elfin5_moveit_config)/launch/move_group.launch">
     <arg name="allow_trajectory_execution" value="true"/>
     <arg name="fake_execution" value="true"/>
-    <arg name="info" value="true"/>
+    <arg name="enable_octomap" value="$(arg enable_octomap)"/>
+    <arg name="move_group_package" value="$(arg move_group_package)"/>
+    <arg name="move_group_executable" value="$(arg move_group_executable)"/>
+    <arg name="info" value="false"/>
     <arg name="debug" value="$(arg debug)"/>
   </include>
 
   <!-- Run Rviz and load the default config to see the state of the move_group node -->
-  <include file="$(find elfin5_moveit_config)/launch/moveit_rviz.launch">
+  <include file="$(find elfin5_moveit_config)/launch/moveit_rviz.launch" if="$(arg display)">
     <arg name="config" value="true"/>
     <arg name="debug" value="$(arg debug)"/>
+    <arg name="config_file" value="$(arg rviz_config)"/>
+    <arg name="use_egl" value="$(arg rviz_egl)"/>
   </include>
 
   <!-- If database loading was enabled, start mongodb as well -->

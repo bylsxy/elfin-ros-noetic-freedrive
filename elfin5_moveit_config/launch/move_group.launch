@@ -19,6 +19,20 @@
   <arg name="max_safe_path_cost" default="1"/>
   <arg name="jiggle_fraction" default="0.05" />
   <arg name="publish_monitored_planning_scene" default="true"/>
+  <arg name="enable_octomap" default="false"/>
+  <arg name="move_group_package" default="moveit_ros_move_group"/>
+  <arg name="move_group_executable" default="move_group"/>
+
+  <!-- ROS parameters survive after nodes exit.  Explicitly clear a sensor
+       list left by an earlier OctoMap launch, otherwise a later no-sensor
+       launch still starts the old point-cloud updater. -->
+  <rosparam param="/move_group/sensors" unless="$(arg enable_octomap)">[]</rosparam>
+
+  <!-- Give the point-cloud self filter a short window to receive the robot
+       TF matching a camera timestamp.  This prevents harmless millisecond
+       future-extrapolation failures on the 30 Hz D455 stream. -->
+  <param name="/robot_description_planning/shape_transform_cache_lookup_wait_time"
+         value="0.10" />
 
   <!-- Planning Functionality -->
   <include ns="move_group" file="$(find elfin5_moveit_config)/launch/planning_pipeline.launch.xml">
@@ -33,12 +47,13 @@
   </include>
 
   <!-- Sensors Functionality -->
-  <include ns="move_group" file="$(find elfin5_moveit_config)/launch/sensor_manager.launch.xml" if="$(arg allow_trajectory_execution)">
+  <include ns="move_group" file="$(find elfin5_moveit_config)/launch/sensor_manager.launch.xml" if="$(arg enable_octomap)">
     <arg name="moveit_sensor_manager" value="elfin5" />
+    <arg name="enable_octomap" value="$(arg enable_octomap)" />
   </include>
 
   <!-- Start the actual move_group node/action server -->
-  <node name="move_group" launch-prefix="$(arg launch_prefix)" pkg="moveit_ros_move_group" type="move_group" respawn="false" output="screen" args="$(arg command_args)">
+  <node name="move_group" launch-prefix="$(arg launch_prefix)" pkg="$(arg move_group_package)" type="$(arg move_group_executable)" respawn="false" output="screen" args="$(arg command_args)">
     <!-- Set the display variable, in case OpenGL code is used internally -->
     <env name="DISPLAY" value="$(optenv DISPLAY :0)" />
 

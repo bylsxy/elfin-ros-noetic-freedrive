@@ -1,3 +1,4 @@
 <launch>
-
+  <!-- The parent launch includes this file only when explicitly enabled. -->
+  <rosparam command="load" file="$(find elfin_vision)/config/sensors_3d.yaml" />
 </launch>
