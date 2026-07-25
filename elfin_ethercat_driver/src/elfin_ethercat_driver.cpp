@@ -587,32 +587,28 @@ bool ElfinEtherCATDriver::enableRobot_cb(std_srvs::SetBool::Request &req, std_sr
         pthread_join(tids[i], NULL);
     }
 
-    struct timespec before, tick;
-    clock_gettime(CLOCK_REALTIME, &before);
-    clock_gettime(CLOCK_REALTIME, &tick);
-    bool flag_tmp;
-    while (ros::ok())
+    bool all_enabled=true;
+    for(int i=0; i<ethercat_clients_.size(); i++)
     {
-        flag_tmp=true;
-        for(int i=0; i<ethercat_clients_.size(); i++)
-        {
-            flag_tmp=flag_tmp && ethercat_clients_[i]->isEnabled();
-        }
-        if(flag_tmp)
-        {
-            resp.success=true;
-            resp.message="robot is enabled";
-            return true;
-        }
-        if(tick.tv_sec*1e+9+tick.tv_nsec - before.tv_sec*1e+9 - before.tv_nsec >= 20e+9)
-        {
-            resp.success=false;
-            resp.message="robot is not enabled";
-            return true;
-        }
-        usleep(100000);
-        clock_gettime(CLOCK_REALTIME, &tick);
+        all_enabled=all_enabled && ethercat_clients_[i]->isEnabled();
     }
+    if(all_enabled)
+    {
+        resp.success=true;
+        resp.message="robot is enabled";
+        return true;
+    }
+
+    // Each setEnable thread waits for its own final status before returning.
+    // If any module is not enabled after all joins, waiting longer cannot turn
+    // that failed attempt into success. Roll every module back immediately.
+    std_srvs::SetBool::Response disable_resp;
+    disableRobot_cb(req, disable_resp);
+    resp.success=false;
+    resp.message=disable_resp.success
+                 ? "robot is not enabled; partial enable was rolled back"
+                 : "robot is not enabled; partial enable rollback failed";
+    return true;
 }
 
 bool ElfinEtherCATDriver::disableRobot_cb(std_srvs::SetBool::Request &req, std_srvs::SetBool::Response &resp)
@@ -654,7 +650,7 @@ bool ElfinEtherCATDriver::disableRobot_cb(std_srvs::SetBool::Request &req, std_s
         flag_tmp=false;
         for(int i=0; i<ethercat_clients_.size(); i++)
         {
-            flag_tmp=flag_tmp || ethercat_clients_[i]->isEnabled();
+            flag_tmp=flag_tmp || ethercat_clients_[i]->hasOperationEnabledAxis();
         }
         if(!flag_tmp)
         {
@@ -671,6 +667,10 @@ bool ElfinEtherCATDriver::disableRobot_cb(std_srvs::SetBool::Request &req, std_s
         usleep(100000);
         clock_gettime(CLOCK_REALTIME, &tick);
     }
+
+    resp.success=false;
+    resp.message="ROS shutdown interrupted Servo Off confirmation";
+    return true;
 }
 
 bool ElfinEtherCATDriver::clearFault_cb(std_srvs::SetBool::Request &req, std_srvs::SetBool::Response &resp)
@@ -719,6 +719,10 @@ bool ElfinEtherCATDriver::clearFault_cb(std_srvs::SetBool::Request &req, std_srv
         usleep(100000);
         clock_gettime(CLOCK_REALTIME, &tick);
     }
+
+    resp.success=false;
+    resp.message="ROS shutdown interrupted fault reset confirmation";
+    return true;
 }
 
 bool ElfinEtherCATDriver::recognizePosition_cb(std_srvs::SetBool::Request &req, std_srvs::SetBool::Response &resp)

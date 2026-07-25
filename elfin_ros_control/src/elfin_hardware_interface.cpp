@@ -39,6 +39,9 @@ Created on Tue Sep 25 10:16 2018
 // update the include file
 #include "elfin_ros_control/elfin_hardware_interface.h"
 
+#include <algorithm>
+#include <limits>
+
 namespace elfin_ros_control {
 
 ElfinHWInterface::ElfinHWInterface(elfin_ethercat_driver::EtherCatManager *manager, const ros::NodeHandle &nh):
@@ -64,7 +67,7 @@ ElfinHWInterface::ElfinHWInterface(elfin_ethercat_driver::EtherCatManager *manag
     {
         for(size_t j=0; j<ethercat_drivers_[i]->getEtherCATClientNumber(); j++)
         {
-            ModuleInfo module_info_tmp;
+            ModuleInfo module_info_tmp = {};
             module_info_tmp.client_ptr=ethercat_drivers_[i]->getEtherCATClientPtr(j);
 
             module_info_tmp.axis1.name=ethercat_drivers_[i]->getJointName(2*j);
@@ -250,6 +253,23 @@ bool ElfinHWInterface::setGroupPosMode(const std::vector<int> &module_no)
 
     for(int j=0; j<module_no.size(); j++)
     {
+        const int module=module_no[j];
+        // Make the drive's first CSP target the encoder position at the
+        // handoff.  This avoids a jump to a command left over from before CST.
+        module_infos_[module].axis1.position_cmd=module_infos_[module].axis1.position;
+        module_infos_[module].axis2.position_cmd=module_infos_[module].axis2.position;
+        const double position_cmd_count1=
+            -1 * module_infos_[module].axis1.position_cmd *
+                module_infos_[module].axis1.count_rad_factor +
+            module_infos_[module].axis1.count_zero;
+        const double position_cmd_count2=
+            -1 * module_infos_[module].axis2.position_cmd *
+                module_infos_[module].axis2.count_rad_factor +
+            module_infos_[module].axis2.count_zero;
+        module_infos_[module].client_ptr->setAxis1PosCnt(
+            int32_t(position_cmd_count1));
+        module_infos_[module].client_ptr->setAxis2PosCnt(
+            int32_t(position_cmd_count2));
         module_infos_[module_no[j]].client_ptr->setAxis1VelFFCnt(0x0);
         module_infos_[module_no[j]].client_ptr->setAxis2VelFFCnt(0x0);
 
@@ -297,8 +317,26 @@ bool ElfinHWInterface::setGroupTrqMode(const std::vector<int> &module_no)
 
     for(int j=0; j<module_no.size(); j++)
     {
-        module_infos_[module_no[j]].client_ptr->setAxis1TrqCnt(0x0);
-        module_infos_[module_no[j]].client_ptr->setAxis2TrqCnt(0x0);
+        const int module=module_no[j];
+        // CiA 402 target torque and actual torque use the same sign and unit.
+        // Seed CST with the torque that was holding the stationary arm in CSP
+        // instead of dropping both axes to zero during the mode transition.
+        const double minimum_count=
+            static_cast<double>(std::numeric_limits<int16_t>::min());
+        const double maximum_count=
+            static_cast<double>(std::numeric_limits<int16_t>::max());
+        const double axis1_count=std::max(
+            minimum_count, std::min(
+                maximum_count,
+                -1 * module_infos_[module].axis1.effort *
+                    module_infos_[module].axis1.count_Nm_factor));
+        const double axis2_count=std::max(
+            minimum_count, std::min(
+                maximum_count,
+                -1 * module_infos_[module].axis2.effort *
+                    module_infos_[module].axis2.count_Nm_factor));
+        module_infos_[module].client_ptr->setAxis1TrqCnt(int16_t(axis1_count));
+        module_infos_[module].client_ptr->setAxis2TrqCnt(int16_t(axis2_count));
     }
 
     for(int j=0; j<module_no.size(); j++)
@@ -354,7 +392,12 @@ bool ElfinHWInterface::prepareSwitch(const std::list<hardware_interface::Control
 {
     std::list<hardware_interface::ControllerInfo>::const_iterator iter;
 
-    if(!stop_list.empty())
+    // During an atomic controller handoff, validate and apply only the mode of
+    // the controller being started.  The old implementation changed CST back
+    // to CSP while processing stop_list, then rejected start_list because the
+    // arm was still moving.  controller_manager reported a failed switch even
+    // though the hardware mode had already changed underneath it.
+    if(start_list.empty() && !stop_list.empty())
     {
         for(iter=stop_list.begin(); iter!=stop_list.end(); iter++)
         {
@@ -552,6 +595,17 @@ void ElfinHWInterface::read_init()
             module_infos_[i].axis2.count_zero-=module_infos_[i].axis2.count_rad_factor*2*M_PI;
         }
         module_infos_[i].axis2.position=-1*(pos_count2-module_infos_[i].axis2.count_zero)/module_infos_[i].axis2.count_rad_factor;
+
+        // Hold the measured pose until a controller deliberately supplies a command.
+        module_infos_[i].axis1.position_cmd=module_infos_[i].axis1.position;
+        module_infos_[i].axis1.velocity_cmd=0.0;
+        module_infos_[i].axis1.vel_ff_cmd=0.0;
+        module_infos_[i].axis1.effort_cmd=0.0;
+
+        module_infos_[i].axis2.position_cmd=module_infos_[i].axis2.position;
+        module_infos_[i].axis2.velocity_cmd=0.0;
+        module_infos_[i].axis2.vel_ff_cmd=0.0;
+        module_infos_[i].axis2.effort_cmd=0.0;
     }
 
 }
@@ -590,7 +644,12 @@ void ElfinHWInterface::write_update()
 {
     for(size_t i=0; i<module_infos_.size(); i++)
     {
-        if(!module_infos_[i].client_ptr->inPosBasedMode())
+        // While a module is disabled, continuously follow the measured pose.
+        // A collision, manual settling or brake release can change the encoder
+        // position after read_init().  Keeping an old command here makes the
+        // next Servo On fail the alignment check or jump toward a stale pose.
+        if(!module_infos_[i].client_ptr->isEnabled()
+           || !module_infos_[i].client_ptr->inPosBasedMode())
         {
             module_infos_[i].axis1.position_cmd=module_infos_[i].axis1.position;
             module_infos_[i].axis2.position_cmd=module_infos_[i].axis2.position;
@@ -614,8 +673,24 @@ void ElfinHWInterface::write_update()
             module_infos_[i].client_ptr->setAxis1VelFFCnt(int16_t(vel_ff_cmd_count1));
             module_infos_[i].client_ptr->setAxis2VelFFCnt(int16_t(vel_ff_cmd_count2));
 
-            double torque_cmd_count1=-1 * module_infos_[i].axis1.effort * module_infos_[i].axis1.count_Nm_factor;
-            double torque_cmd_count2=-1 * module_infos_[i].axis2.effort * module_infos_[i].axis2.count_Nm_factor;
+            // The command interface is distinct from the measured effort.
+            // Using axis*.effort here silently fed the feedback torque back to
+            // the drives and made every EffortJointInterface controller
+            // ineffective (and potentially unstable).
+            const double minimum_count=
+                static_cast<double>(std::numeric_limits<int16_t>::min());
+            const double maximum_count=
+                static_cast<double>(std::numeric_limits<int16_t>::max());
+            double torque_cmd_count1=std::max(
+                minimum_count, std::min(
+                    maximum_count,
+                    -1 * module_infos_[i].axis1.effort_cmd *
+                        module_infos_[i].axis1.count_Nm_factor));
+            double torque_cmd_count2=std::max(
+                minimum_count, std::min(
+                    maximum_count,
+                    -1 * module_infos_[i].axis2.effort_cmd *
+                        module_infos_[i].axis2.count_Nm_factor));
 
             module_infos_[i].client_ptr->setAxis1TrqCnt(int16_t(torque_cmd_count1));
             module_infos_[i].client_ptr->setAxis2TrqCnt(int16_t(torque_cmd_count2));
@@ -670,6 +745,8 @@ void* update_loop(void* threadarg)
 
         clock_nanosleep(CLOCK_REALTIME, TIMER_ABSTIME, &tick, NULL);
     }
+
+    return NULL;
 }
 
 int main(int argc, char** argv)
@@ -678,7 +755,12 @@ int main(int argc, char** argv)
 
     ros::NodeHandle nh("~");
     std::string ethernet_name;
-    ethernet_name=nh.param<std::string>("elfin_ethernet_name", "eth0");
+    ethernet_name=nh.param<std::string>("elfin_ethernet_name", "");
+    if (ethernet_name.empty())
+    {
+        ROS_FATAL("No verified EtherCAT interface was provided. Use start_elfin5_hardware.sh or pass elfin_ethernet_name explicitly.");
+        return 1;
+    }
 
     elfin_ethercat_driver::EtherCatManager em(ethernet_name);
     elfin_ros_control::ElfinHWInterface elfin_hw(&em);
@@ -696,4 +778,8 @@ int main(int argc, char** argv)
         ros::spinOnce();
         r.sleep();
     }
+
+    pthread_join(tid, NULL);
+    delete thread_arg;
+    return 0;
 }

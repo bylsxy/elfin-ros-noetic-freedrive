@@ -10,6 +10,15 @@
   <xacro:property name="PI" value="3.1415926535897931"/>
   
   <xacro:property name="density" value="3.09"/>
+
+  <!-- Defaults preserve the original model. The freedrive simulation passes
+       non-zero values to keep effort-controlled joints numerically damped. -->
+  <xacro:arg name="joint_damping_1" default="0.0" />
+  <xacro:arg name="joint_damping_2" default="0.0" />
+  <xacro:arg name="joint_damping_3" default="0.0" />
+  <xacro:arg name="joint_damping_4" default="0.0" />
+  <xacro:arg name="joint_damping_5" default="0.0" />
+  <xacro:arg name="joint_damping_6" default="0.0" />
   
   <link name="world"/>
   
@@ -127,6 +136,7 @@
       link="elfin_link1" />
     <axis
       xyz="0 0 1" />
+    <dynamics damping="$(arg joint_damping_1)" friction="0.0" />
     <limit
       lower="-3.14"
       upper="3.14"
@@ -185,6 +195,7 @@
       link="elfin_link2" />
     <axis
       xyz="0 0 1" />
+    <dynamics damping="$(arg joint_damping_2)" friction="0.0" />
     <limit
       lower="-2.35"
       upper="2.35"
@@ -243,6 +254,7 @@
       link="elfin_link3" />
     <axis
       xyz="0 0 1" />
+    <dynamics damping="$(arg joint_damping_3)" friction="0.0" />
     <limit
       lower="-2.61"
       upper="2.61"
@@ -301,6 +313,7 @@
       link="elfin_link4" />
     <axis
       xyz="0 0 1" />
+    <dynamics damping="$(arg joint_damping_4)" friction="0.0" />
     <limit
       lower="-3.14"
       upper="3.14"
@@ -359,6 +372,7 @@
       link="elfin_link5" />
     <axis
       xyz="0 0 1" />
+    <dynamics damping="$(arg joint_damping_5)" friction="0.0" />
     <limit
       lower="-2.56"
       upper="2.56"
@@ -417,6 +431,7 @@
       link="elfin_link6" />
     <axis
       xyz="0 0 1" />
+    <dynamics damping="$(arg joint_damping_6)" friction="0.0" />
     <limit
       lower="-3.14"
       upper="3.14"

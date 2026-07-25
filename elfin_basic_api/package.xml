@@ -53,8 +53,10 @@
   <build_depend>control_msgs</build_depend>
   <build_depend>controller_manager_msgs</build_depend>
   <build_depend>elfin_robot_msgs</build_depend>
+  <build_depend>elfin_freedrive_controller</build_depend>
   <build_depend>std_srvs</build_depend>
   <build_depend>std_msgs</build_depend>
+  <build_depend>sensor_msgs</build_depend>
   <build_depend>genmsg</build_depend>
   <run_depend>moveit_core</run_depend>
   <run_depend>moveit_planners_ompl</run_depend>
@@ -68,8 +70,10 @@
   <run_depend>control_msgs</run_depend>
   <run_depend>controller_manager_msgs</run_depend>
   <run_depend>elfin_robot_msgs</run_depend>
+  <run_depend>elfin_freedrive_controller</run_depend>
   <run_depend>std_srvs</run_depend>
   <run_depend>std_msgs</run_depend>
+  <run_depend>sensor_msgs</run_depend>
 
 
   <!-- The export tag contains other, unspecified, tags -->

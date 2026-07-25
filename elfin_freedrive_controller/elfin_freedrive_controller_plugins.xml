@@ -1,0 +1,9 @@
+<library path="lib/libelfin_freedrive_controller">
+  <class name="elfin_freedrive_controller/ElfinFreedriveController"
+         type="elfin_freedrive_controller::ElfinFreedriveController"
+         base_class_type="controller_interface::ControllerBase">
+    <description>
+      Gravity compensation with velocity damping, joint-limit walls and torque limits.
+    </description>
+  </class>
+</library>

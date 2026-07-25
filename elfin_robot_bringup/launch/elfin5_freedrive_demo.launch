@@ -1,0 +1,18 @@
+<launch>
+  <!-- Complete offline demo: Gazebo effort model + MoveIt + Basic API + Panel. -->
+  <arg name="gazebo_gui" default="false" />
+  <arg name="rviz" default="false" />
+  <arg name="rviz_egl" default="false" />
+  <arg name="rviz_config"
+       default="$(find elfin5_moveit_config)/launch/moveit_low_load.rviz" />
+
+  <include file="$(find elfin_freedrive_controller)/launch/elfin5_freedrive_sim.launch">
+    <arg name="gui" value="$(arg gazebo_gui)" />
+  </include>
+
+  <include file="$(find elfin_robot_bringup)/launch/elfin5_control_panel.launch">
+    <arg name="display" value="$(arg rviz)" />
+    <arg name="rviz_egl" value="$(arg rviz_egl)" />
+    <arg name="rviz_config" value="$(arg rviz_config)" />
+  </include>
+</launch>

@@ -1,0 +1,18 @@
+<launch>
+  <!--
+    Start MoveIt before the Basic API so robot_description_semantic, the
+    elfin_arm planning group and /get_planning_scene are all available.
+    This launch does not start Gazebo or the EtherCAT hardware driver.
+  -->
+  <arg name="display" default="false" />
+  <arg name="rviz_config" default="$(find elfin5_moveit_config)/launch/moveit_low_load.rviz" />
+  <arg name="rviz_egl" default="false" />
+
+  <include file="$(find elfin5_moveit_config)/launch/moveit_planning_execution.launch">
+    <arg name="display" value="$(arg display)" />
+    <arg name="rviz_config" value="$(arg rviz_config)" />
+    <arg name="rviz_egl" value="$(arg rviz_egl)" />
+  </include>
+
+  <include file="$(find elfin_basic_api)/launch/elfin_basic_api.launch" />
+</launch>

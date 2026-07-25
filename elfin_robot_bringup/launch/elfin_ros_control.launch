@@ -1,7 +1,13 @@
-<launch>    
+<launch>
+
+  <arg name="elfin_ethernet_name" default="" />
+  <arg name="load_freedrive" default="true" />
+  <arg name="start_freedrive_manager" default="true" />
+  <arg name="allow_hardware_freedrive" default="false" />
  
   <node name="elfin_ros_control" pkg="elfin_ros_control" type="elfin_hardware_interface" output="screen">
     <rosparam file="$(find elfin_robot_bringup)/config/elfin_drivers.yaml" command="load"/>
+    <param name="elfin_ethernet_name" value="$(arg elfin_ethernet_name)" />
   </node>
  
   <rosparam file="$(find elfin_robot_bringup)/config/joint_state_controller.yaml" command="load"/>
@@ -9,5 +15,23 @@
   
   <rosparam file="$(find elfin_robot_bringup)/config/elfin_arm_control.yaml" command="load"/>
   <node name="elfin_arm_controller_spawner" pkg="controller_manager" type="controller_manager" args="load elfin_arm_controller" respawn="false" output="screen"/>
-  
+
+  <!-- Normal bringup only loads the gravity controller; the manager owns every start/stop. -->
+  <group if="$(arg load_freedrive)">
+    <rosparam file="$(find elfin_freedrive_controller)/config/elfin_freedrive_controller.yaml" command="load"/>
+    <node name="elfin_freedrive_controller_loader"
+          pkg="controller_manager" type="controller_manager"
+          args="load elfin_freedrive_controller"
+          respawn="false" output="screen"/>
+  </group>
+
+  <node if="$(arg start_freedrive_manager)"
+        name="elfin_freedrive_manager"
+        pkg="elfin_freedrive_controller" type="elfin_freedrive_manager"
+        respawn="false" output="screen">
+    <param name="simulation" value="false" />
+    <param name="allow_hardware_freedrive" value="$(arg allow_hardware_freedrive)" />
+    <param name="poll_tool_buttons" value="true" />
+  </node>
+
 </launch>

@@ -2,6 +2,8 @@
 
   <node name="elfin_basic_api" pkg="elfin_basic_api" type="elfin_basic_api_node" output="screen">
     <param name="octomap_resolution" value="0.1"/>
+    <!-- Do not inherit a stale dynamic_reconfigure value after a hot restart. -->
+    <param name="velocity_scaling" value="0.01"/>
   </node>
   
   <node name="elfin_gui" pkg="elfin_basic_api" type="elfin_gui.py" respawn="true" output="screen" />

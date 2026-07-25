@@ -5,5 +5,21 @@ to_do
 .catkin_workspace
 .gitignore
 
+# Python / editor caches
+**/__pycache__/
+*.py[cod]
+.idea/
+.vscode/
+
+# Runtime data and generated diagnostics
+*.bag
+*.bag.active
+*.log
+.ros/
+elfin_freedrive_trials/
+
+# Vendor manuals are local reference material; redistribution is not assumed.
+docs/*.pdf
+
 # delete cach if git ignore doesnt work
 # git rm --cached -r .

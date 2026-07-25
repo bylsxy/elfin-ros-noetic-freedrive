@@ -308,7 +308,20 @@ bool ElfinTeleopAPI::cartTeleop_cb(elfin_robot_msgs::SetInt16::Request &req, elf
     std::string direction;
 
     bool ik_have_result=true;
-    for(int i=0; i<100; i++)
+
+    // Linear jogs keep the upstream 0.5 m planning window (100 * 5 mm).
+    // Rotational jogs used to share that same 100-point limit, which imposed
+    // an unrelated fixed stop after 2 rad (100 * 0.02 rad), even while the
+    // button was still held.  Let rotation continue until IK, collision,
+    // joint continuity or a physical joint bound stops it.  The very large
+    // point guard is only a defence against a pathological cyclic IK result;
+    // it corresponds to 100 rad and is not a normal jog limit.
+    const size_t linear_planning_points=100;
+    const size_t trajectory_point_guard=5000;
+    const size_t planning_point_limit=(operation_num<=3)
+                                      ? linear_planning_points
+                                      : trajectory_point_guard;
+    for(size_t i=0; ros::ok() && i<planning_point_limit; i++)
     {
         switch (operation_num) {
         case 1:
@@ -369,7 +382,7 @@ bool ElfinTeleopAPI::cartTeleop_cb(elfin_robot_msgs::SetInt16::Request &req, elf
                 break;
             point_tmp.positions.resize(goal_.trajectory.joint_names.size());
             double biggest_shift=0;
-            for(int j=0; j<goal_.trajectory.joint_names.size(); j++)
+            for(size_t j=0; j<goal_.trajectory.joint_names.size(); j++)
             {
                 point_tmp.positions[j]=*kinematic_state.getJointPositions(goal_.trajectory.joint_names[j]);
                 if(i==0)

@@ -211,13 +211,83 @@ bool ElfinBasicAPI::enableRobot_cb(std_srvs::SetBool::Request &req, std_srvs::Se
 
     // Enable servos
     raw_enable_robot_request_.data=true;
-    raw_enable_robot_client_.call(raw_enable_robot_request_, raw_enable_robot_response_);
+    if(!raw_enable_robot_client_.call(raw_enable_robot_request_, raw_enable_robot_response_)
+       || !raw_enable_robot_response_.success)
+    {
+        // The driver enables three dual-axis modules independently.  A failed
+        // call may therefore have released only some brakes; force a complete
+        // rollback before returning an error to the Panel.
+        raw_disable_robot_request_.data=true;
+        raw_disable_robot_client_.call(raw_disable_robot_request_, raw_disable_robot_response_);
+        resp=raw_enable_robot_response_;
+        if(resp.message.empty())
+            resp.message="Failed to enable the servos";
+        if(raw_disable_robot_response_.success)
+            resp.message+="; servos were disabled";
+        else
+            resp.message+="; WARNING: Servo Off rollback was not confirmed";
+        resp.success=false;
+        return true;
+    }
     resp=raw_enable_robot_response_;
+
+    // Brake release can make a module report motion briefly after Servo On.
+    // Require several consecutive stopped samples before asking ros_control
+    // to claim the joints.  A single stopped sample is not enough: that race
+    // was the reason controller startup was intermittently rejected.
+    const int required_stopped_samples=5;
+    int stopped_samples=0;
+    for(int attempt=0; attempt<40 && stopped_samples<required_stopped_samples; ++attempt)
+    {
+        req_tmp.data=true;
+        if(get_motion_state_client_.call(req_tmp, resp_tmp) && !resp_tmp.success)
+            ++stopped_samples;
+        else
+            stopped_samples=0;
+        usleep(100000);
+    }
+
+    if(stopped_samples<required_stopped_samples)
+    {
+        raw_disable_robot_request_.data=true;
+        raw_disable_robot_client_.call(raw_disable_robot_request_, raw_disable_robot_response_);
+        resp.success=false;
+        resp.message="Servo On did not become stably stopped within 4 seconds; servos were disabled";
+        return true;
+    }
 
     // Start default controller
     if(!startElfinCtrlr(resp_tmp))
     {
-        resp=resp_tmp;
+        raw_disable_robot_request_.data=true;
+        raw_disable_robot_client_.call(raw_disable_robot_request_, raw_disable_robot_response_);
+        resp.success=false;
+        resp.message=resp_tmp.message+"; servos were disabled";
+        return true;
+    }
+
+    // Starting a position controller refreshes its command to the measured
+    // pose.  Verify that the drive command and encoder position converge; if
+    // they do not, stop the controller before disabling the servos.
+    bool aligned_after_start=false;
+    for(int attempt=0; attempt<20; ++attempt)
+    {
+        req_tmp.data=true;
+        if(get_pos_align_state_client_.call(req_tmp, resp_tmp) && resp_tmp.success)
+        {
+            aligned_after_start=true;
+            break;
+        }
+        usleep(50000);
+    }
+    if(!aligned_after_start)
+    {
+        std_srvs::SetBool::Response stop_response;
+        stopActCtrlrs(stop_response);
+        raw_disable_robot_request_.data=true;
+        raw_disable_robot_client_.call(raw_disable_robot_request_, raw_disable_robot_response_);
+        resp.success=false;
+        resp.message="Controller position did not align after Servo On; controller stopped and servos disabled";
         return true;
     }
 

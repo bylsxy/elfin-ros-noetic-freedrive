@@ -1,0 +1,73 @@
+<launch>
+  <!-- This launch contains no EtherCAT node and cannot command the real arm. -->
+  <arg name="gui" default="false" />
+  <arg name="paused" default="false" />
+
+  <param name="/use_sim_time" value="true" />
+  <!-- Keep gzserver away from the Jetson desktop GLX context. It only needs
+       software rendering for this robot model; gzclient remains opt-in. -->
+  <node unless="$(arg paused)" name="gazebo" pkg="gazebo_ros" type="gzserver"
+        args="-e ode worlds/empty.world"
+        launch-prefix="env -u DISPLAY -u XAUTHORITY LIBGL_ALWAYS_SOFTWARE=1"
+        respawn="false" output="screen" />
+  <node if="$(arg paused)" name="gazebo" pkg="gazebo_ros" type="gzserver"
+        args="-u -e ode worlds/empty.world"
+        launch-prefix="env -u DISPLAY -u XAUTHORITY LIBGL_ALWAYS_SOFTWARE=1"
+        respawn="false" output="screen" />
+  <node if="$(arg gui)" name="gazebo_gui" pkg="gazebo_ros" type="gzclient"
+        respawn="false" output="screen" />
+
+  <param name="robot_description"
+         command="$(find xacro)/xacro --inorder '$(find elfin_description)/urdf/elfin5.urdf.xacro' transmission_hw_interface:=hardware_interface/EffortJointInterface joint_damping_1:=0.5 joint_damping_2:=1.0 joint_damping_3:=0.7 joint_damping_4:=0.2 joint_damping_5:=0.1 joint_damping_6:=0.05" />
+
+  <node name="urdf_spawner" pkg="gazebo_ros" type="spawn_model"
+        args="-urdf -model elfin5_freedrive -param robot_description -z 0.1"
+        respawn="false" output="screen" />
+
+  <node name="robot_state_publisher" pkg="robot_state_publisher"
+        type="robot_state_publisher" output="screen">
+    <param name="publish_frequency" value="50.0" />
+  </node>
+
+  <rosparam file="$(find elfin_freedrive_controller)/config/elfin_freedrive_sim_control.yaml" command="load" />
+  <node name="joint_state_controller_spawner" pkg="controller_manager"
+        type="spawner" args="joint_state_controller"
+        respawn="false" output="screen" />
+
+  <node name="elfin_arm_controller_spawner" pkg="controller_manager"
+        type="spawner" args="elfin_arm_controller"
+        respawn="false" output="screen" />
+
+  <rosparam file="$(find elfin_freedrive_controller)/config/elfin_freedrive_controller.yaml" command="load" />
+  <!-- The physical E05 has a measured gravity calibration. Gazebo uses the
+       URDF inertial model directly and must not inherit those hardware gains. -->
+  <rosparam param="/elfin_freedrive_controller/gravity_joint_scales">
+    [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+  </rosparam>
+  <rosparam param="/elfin_freedrive_controller/gravity_bias">
+    [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  </rosparam>
+  <!-- Gazebo effort feedback is controller-dependent, so hardware-only model
+       agreement is bypassed while the same handoff and recovery logic is tested. -->
+  <param name="/elfin_freedrive_controller/require_model_validation" value="false" />
+  <!-- Hardware settling gains excite Gazebo's low-inertia wrist joints. These
+       simulation-only gains preserve damping without numerical oscillation. -->
+  <rosparam param="/elfin_freedrive_controller/settle_damping">
+    [1.5, 1.5, 1.0, 0.4, 0.2, 0.18]
+  </rosparam>
+  <node name="elfin_freedrive_controller_loader" pkg="controller_manager"
+        type="controller_manager" args="load elfin_freedrive_controller"
+        respawn="false" output="screen" />
+
+  <node name="elfin_freedrive_manager" pkg="elfin_freedrive_controller"
+        type="elfin_freedrive_manager" respawn="false" output="screen">
+    <param name="simulation" value="true" />
+    <!-- Gazebo settles with small numerical velocity oscillations. This does
+         not change the stricter hardware value loaded from the YAML file. -->
+    <param name="exit_velocity_limit" value="0.01" />
+    <param name="exit_stable_samples_required" value="3" />
+    <param name="allow_hardware_freedrive" value="true" />
+    <param name="poll_tool_buttons" value="false" />
+    <param name="record_file" value="/tmp/elfin_freedrive_sim_points.yaml" />
+  </node>
+</launch>

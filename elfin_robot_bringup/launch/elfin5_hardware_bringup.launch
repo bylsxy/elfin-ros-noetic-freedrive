@@ -1,0 +1,11 @@
+<launch>
+  <arg name="elfin_ethernet_name" default="" />
+  <arg name="allow_hardware_freedrive" default="false" />
+
+  <include file="$(find elfin_robot_bringup)/launch/elfin5_bringup.launch" />
+
+  <include file="$(find elfin_robot_bringup)/launch/elfin_ros_control.launch">
+    <arg name="elfin_ethernet_name" value="$(arg elfin_ethernet_name)" />
+    <arg name="allow_hardware_freedrive" value="$(arg allow_hardware_freedrive)" />
+  </include>
+</launch>

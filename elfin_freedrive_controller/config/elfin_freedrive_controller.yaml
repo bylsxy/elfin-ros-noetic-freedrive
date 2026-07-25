@@ -1,0 +1,100 @@
+# This controller is deliberately loaded but not started by the normal bringup.
+# Explicit per-axis limits cover the validated empty-arm gravity envelope while
+# remaining far below the E05 URDF ratings. The controller rejects any pose
+# whose model gravity would consume 90% of one of these limits.
+elfin_freedrive_controller:
+  type: elfin_freedrive_controller/ElfinFreedriveController
+  joints:
+    - elfin_joint1
+    - elfin_joint2
+    - elfin_joint3
+    - elfin_joint4
+    - elfin_joint5
+    - elfin_joint6
+  root_link: elfin_base
+  tip_link: elfin_end_link
+  gravity: [0.0, 0.0, -9.81]
+  gravity_scale: 1.0
+  gravity_joint_scales: [1.0, 1.8307835762794629, 1.7616246212198707, 1.0, 1.0, 1.0]
+  gravity_bias: [0.0, -0.45193016673879843, -0.19530071881191882, 0.0, 0.0, 0.0]
+  # 2026-07-24: 17 passive CSP samples, 6 opposite-approach pose pairs.
+  # J2/J3 leave-one-pose-out maximum errors: 0.507 / 1.159 Nm.
+  gravity_calibration_verified: true
+  # True hardware must agree with the model before the controller blends away
+  # from the torque that was holding the arm in position mode.
+  require_model_validation: true
+  minimum_validation_effort: 1.5
+  minimum_validation_joints: 2
+  minimum_model_alignment: 0.90
+  minimum_model_scale: 0.50
+  maximum_model_scale: 2.0
+  maximum_model_residual: 0.30
+  # A single pose cannot distinguish payload, friction and a human preload.
+  # 2026-07-25 logs showed a stable hand preload shifting the estimate from
+  # 0.544 to 1.201 and causing directional drift. Keep the validated multi-pose
+  # model fixed; the measured entry effort is only used for the 0.5 s handoff.
+  adaptive_entry_scale: false
+  minimum_adaptive_scale: 0.75
+  maximum_adaptive_scale: 1.25
+  handoff_duration: 0.5
+  allow_model_validation_warning: true
+  minimum_warning_alignment: 0.5
+  effort_limit_scale: 0.20
+  # J2 needs about 60-68 Nm around the 2026-07-25 high-load empty-arm pose.
+  # 84 Nm is still capped at 20% of the E05 URDF rating (420 Nm).
+  effort_limits: [15.0, 84.0, 30.0, 15.0, 8.0, 8.0]
+  maximum_gravity_effort_fraction: 0.90
+  damping: [1.2, 1.2, 0.8, 0.35, 0.18, 0.18]
+  damping_scales: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+  minimum_damping_scale: 0.25
+  maximum_damping_scale: 2.0
+  settle_damping: [12.0, 12.0, 8.0, 4.0, 2.5, 2.5]
+  friction: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  friction_velocity: [0.05, 0.05, 0.05, 0.05, 0.05, 0.05]
+  torque_rate_limits: [100.0, 100.0, 60.0, 40.0, 20.0, 20.0]
+  velocity_soft_limits: [0.10, 0.10, 0.10, 0.15, 0.20, 0.20]
+  velocity_hard_limits: [0.20, 0.20, 0.20, 0.30, 0.40, 0.40]
+  velocity_limit_scale: 1.0
+  minimum_velocity_limit_scale: 0.5
+  maximum_velocity_limit_scale: 2.0
+  limit_margin: 0.08
+  hard_limit_margin: 0.02
+  limit_stiffness: 5.0
+  limit_damping: 0.5
+  velocity_limit_damping: 2.0
+  hard_stop_damping: 12.0
+
+# The manager performs this passive check while the normal position controller
+# still owns the arm. It never releases a brake to identify gravity.
+elfin_freedrive_manager:
+  velocity_hard_limits: [0.20, 0.20, 0.20, 0.30, 0.40, 0.40]
+  velocity_limit_scale: 1.0
+  minimum_velocity_limit_scale: 0.5
+  maximum_velocity_limit_scale: 2.0
+  entry_velocity_limit: 0.02
+  exit_velocity_limit: 0.003
+  exit_stable_samples_required: 10
+  exit_settle_timeout: 8.0
+  protective_exit_settle_timeout: 1.0
+  preflight_min_samples: 12
+  preflight_min_duration: 0.25
+  preflight_window: 0.75
+  preflight_velocity_limit: 0.003
+  preflight_position_tolerance: 0.003
+  preflight_max_effort_stddev: 2.0
+  allow_model_validation_warning: true
+  minimum_warning_alignment: 0.5
+  damping_scales: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+  minimum_damping_scale: 0.25
+  maximum_damping_scale: 2.0
+  calibration_min_samples: 6
+  calibration_min_paired_poses: 5
+  calibration_min_pose_separation: 0.08
+  calibration_min_model_change: 1.0
+  calibration_min_approach_delta: 0.05
+  calibration_pair_pose_tolerance: 0.02
+  calibration_min_model_range: 4.0
+  calibration_min_scale: 0.50
+  calibration_max_scale: 4.0
+  calibration_max_normalized_residual: 0.15
+  calibration_max_absolute_residual: 5.0

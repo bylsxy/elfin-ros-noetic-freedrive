@@ -142,6 +142,7 @@ public:
     void clearPoseFault();
     bool recognizePose();
     bool isEnabled();
+    bool hasOperationEnabledAxis();
     static void *setEnable(void *threadarg);
     static void *setDisable(void *threadarg);
     static void *recognizePoseCmd(void *threadarg);

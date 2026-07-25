@@ -141,10 +141,16 @@ catkin_package(
 
 ## Mark executable scripts (Python etc.) for installation
 ## in contrast to setup.py, you can choose the destination
-# install(PROGRAMS
-#   scripts/my_python_script
-#   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
-# )
+install(PROGRAMS
+  script/detect_elfin_ethercat_interface.sh
+  script/elfin_collision_recovery.sh
+  script/elfin_offline_smoke_test.sh
+  script/elfin_software_stop.sh
+  script/start_elfin5_freedrive_sim.sh
+  script/start_elfin5_panel.sh
+  script/start_elfin5_hardware.sh
+  DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+)
 
 ## Mark executables and/or libraries for installation
 # install(TARGETS elfin_bringup elfin_bringup_node

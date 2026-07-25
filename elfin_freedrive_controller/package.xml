@@ -1,0 +1,44 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>elfin_freedrive_controller</name>
+  <version>0.1.0</version>
+  <description>Bounded gravity-compensated hand-guiding controller for Elfin robots.</description>
+
+  <maintainer email="1832652154@qq.com">bylsxy</maintainer>
+  <license>BSD</license>
+  <url type="repository">https://github.com/bylsxy/elfin-ros-noetic-freedrive</url>
+
+  <buildtool_depend>catkin</buildtool_depend>
+  <depend>controller_manager_msgs</depend>
+  <depend>controller_interface</depend>
+  <depend>elfin_robot_msgs</depend>
+  <depend>hardware_interface</depend>
+  <depend>kdl_parser</depend>
+  <build_depend>message_generation</build_depend>
+  <exec_depend>message_runtime</exec_depend>
+  <depend>pluginlib</depend>
+  <depend>realtime_tools</depend>
+  <depend>roscpp</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>urdf</depend>
+
+  <exec_depend>controller_manager</exec_depend>
+  <exec_depend>effort_controllers</exec_depend>
+  <exec_depend>elfin_description</exec_depend>
+  <exec_depend>gazebo_ros</exec_depend>
+  <exec_depend>joint_state_controller</exec_depend>
+  <exec_depend>moveit_commander</exec_depend>
+  <exec_depend>moveit_msgs</exec_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>rospy</exec_depend>
+  <exec_depend>xacro</exec_depend>
+
+  <test_depend>rostest</test_depend>
+  <test_depend>gtest</test_depend>
+
+  <export>
+    <controller_interface plugin="${prefix}/elfin_freedrive_controller_plugins.xml"/>
+  </export>
+</package>

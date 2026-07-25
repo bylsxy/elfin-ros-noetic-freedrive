@@ -599,6 +599,12 @@ bool ElfinEtherCATClient::isEnabled()
         return false;
 }
 
+bool ElfinEtherCATClient::hasOperationEnabledAxis()
+{
+    return (readInput_half_unit(elfin_txpdo::AXIS1_STATUSWORD_L16, false) & 0xf) == 0x7
+        || (readInput_half_unit(elfin_txpdo::AXIS2_STATUSWORD_L16, false) & 0xf) == 0x7;
+}
+
 void *ElfinEtherCATClient::setEnable(void* threadarg)
 {
     ElfinEtherCATClient *pthis=(ElfinEtherCATClient *)threadarg;
@@ -652,6 +658,7 @@ void *ElfinEtherCATClient::setEnable(void* threadarg)
         if(tick.tv_sec*1e+9+tick.tv_nsec - before.tv_sec*1e+9 - before.tv_nsec >= 2e+9)
         {
             ROS_WARN("setEnable phase1 in slave %i failed", pthis->slave_no_);
+            setDisable(threadarg);
             return (void *)0;
         }
         usleep(10000);
@@ -673,6 +680,7 @@ void *ElfinEtherCATClient::setEnable(void* threadarg)
         if(tick.tv_sec*1e+9+tick.tv_nsec - before.tv_sec*1e+9 - before.tv_nsec >= 2e+9)
         {
             ROS_WARN("setEnable phase2 in slave %i failed", pthis->slave_no_);
+            setDisable(threadarg);
             return (void *)0;
         }
         usleep(10000);
@@ -694,6 +702,7 @@ void *ElfinEtherCATClient::setEnable(void* threadarg)
         if(tick.tv_sec*1e+9+tick.tv_nsec - before.tv_sec*1e+9 - before.tv_nsec >= 2e+9)
         {
             ROS_WARN("setEnable phase3 in slave %i failed", pthis->slave_no_);
+            setDisable(threadarg);
             return (void *)0;
         }
         usleep(10000);
@@ -704,21 +713,18 @@ void *ElfinEtherCATClient::setEnable(void* threadarg)
     pthis->writeOutput_half_unit(elfin_rxpdo::AXIS2_CONTROLWORD_L16, 0x1f, false);
 
     usleep(100000);
+    return (void *)1;
 }
 
 void *ElfinEtherCATClient::setDisable(void *threadarg)
 {
     ElfinEtherCATClient *pthis=(ElfinEtherCATClient *)threadarg;
-    if(pthis->isEnabled())
-    {
-        pthis->writeOutput_half_unit(elfin_rxpdo::AXIS1_CONTROLWORD_L16, 0x6, false);
-        pthis->writeOutput_half_unit(elfin_rxpdo::AXIS2_CONTROLWORD_L16, 0x6, false);
-        return (void *)0;
-    }
-    else
-    {
-        return (void *)0;
-    }
+    // Always request Shutdown for both channels. isEnabled() is true only
+    // when both axes are operation-enabled, so using it as a guard skipped
+    // exactly the dangerous partial-enable states that need rollback most.
+    pthis->writeOutput_half_unit(elfin_rxpdo::AXIS1_CONTROLWORD_L16, 0x6, false);
+    pthis->writeOutput_half_unit(elfin_rxpdo::AXIS2_CONTROLWORD_L16, 0x6, false);
+    return (void *)0;
 }
 
 void *ElfinEtherCATClient::recognizePoseCmd(void *threadarg)
@@ -735,10 +741,13 @@ void *ElfinEtherCATClient::recognizePoseCmd(void *threadarg)
         return (void *)0;
     }
 
+    return (void *)1;
 }
 
 bool ElfinEtherCATClient::isWarning()
 {
+    // Statusword bit 3 is the CiA 402 Fault bit.  The historical method name
+    // is retained for API compatibility, but this is not merely a warning.
     if((readInput_half_unit(elfin_txpdo::AXIS1_STATUSWORD_L16, false) & 0x08)==0x08
        || (readInput_half_unit(elfin_txpdo::AXIS2_STATUSWORD_L16, false) & 0x08)==0x08)
         return true;
@@ -818,6 +827,10 @@ bool ElfinEtherCATClient::enable_cb(std_srvs::SetBool::Request& req, std_srvs::S
         usleep(100000);
         clock_gettime(CLOCK_REALTIME, &tick);
     }
+
+    resp.success=false;
+    resp.message="ROS shutdown interrupted module enable confirmation";
+    return true;
 }
 
 bool ElfinEtherCATClient::reset_fault_cb(std_srvs::SetBool::Request &req, std_srvs::SetBool::Response &resp)
@@ -1109,4 +1122,3 @@ bool ElfinEtherCATClient::close_brake_cb(std_srvs::SetBool::Request &req, std_sr
 }
 
 }
-

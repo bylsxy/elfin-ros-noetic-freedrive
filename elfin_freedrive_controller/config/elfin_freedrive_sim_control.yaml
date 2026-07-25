@@ -1,0 +1,30 @@
+# Gazebo-only state and effort trajectory controllers. They keep the
+# controller package independent from the hardware bringup package.
+joint_state_controller:
+  type: joint_state_controller/JointStateController
+  publish_rate: 50
+
+# Position hold before and after the gravity controller owns the same six
+# effort interfaces.
+elfin_arm_controller:
+  type: effort_controllers/JointTrajectoryController
+  joints:
+    - elfin_joint1
+    - elfin_joint2
+    - elfin_joint3
+    - elfin_joint4
+    - elfin_joint5
+    - elfin_joint6
+  gains:
+    elfin_joint1: {p: 80.0, i: 0.0, d: 8.0, i_clamp: 0.0}
+    elfin_joint2: {p: 120.0, i: 0.0, d: 12.0, i_clamp: 0.0}
+    elfin_joint3: {p: 80.0, i: 0.0, d: 8.0, i_clamp: 0.0}
+    elfin_joint4: {p: 15.0, i: 0.0, d: 1.0, i_clamp: 0.0}
+    elfin_joint5: {p: 8.0, i: 0.0, d: 0.5, i_clamp: 0.0}
+    elfin_joint6: {p: 4.0, i: 0.0, d: 0.25, i_clamp: 0.0}
+  constraints:
+    goal_time: 0.6
+    stopped_velocity_tolerance: 0.05
+  stop_trajectory_duration: 0.1
+  state_publish_rate: 25
+  action_monitor_rate: 10

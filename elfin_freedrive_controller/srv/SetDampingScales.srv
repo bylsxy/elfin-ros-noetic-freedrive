@@ -1,0 +1,5 @@
+float64[] scales
+---
+bool success
+string message
+float64[] applied_scales

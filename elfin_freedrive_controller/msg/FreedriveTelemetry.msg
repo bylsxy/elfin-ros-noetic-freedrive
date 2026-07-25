@@ -1,0 +1,27 @@
+uint8 STATUS_INACTIVE=0
+uint8 STATUS_ACTIVE=1
+uint8 STATUS_LIMIT=2
+uint8 STATUS_SOLVER_ERROR=3
+uint8 STATUS_SAFETY_STOP=4
+uint8 STATUS_MODEL_MISMATCH=5
+uint8 STATUS_SETTLING=6
+uint8 STATUS_MODEL_WARNING=7
+uint8 STATUS_GRAVITY_CAPACITY=8
+
+std_msgs/Header header
+uint8 status
+string[] joint_names
+float64[] position
+float64[] velocity
+float64[] measured_effort
+float64[] gravity_effort
+float64[] commanded_effort
+float64[] effective_gravity_scale
+float64 handoff_progress
+float64 model_alignment
+float64 model_scale_estimate
+float64 model_normalized_residual
+uint32 model_excited_joints
+uint32 model_direction_mismatches
+bool model_validation_passed
+bool settling

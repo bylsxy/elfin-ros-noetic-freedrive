@@ -22,6 +22,7 @@
   <exec_depend>elfin_basic_api</exec_depend>
   <exec_depend>elfin_description</exec_depend>
   <exec_depend>elfin_ethercat_driver</exec_depend>
+  <exec_depend>elfin_freedrive_controller</exec_depend>
   <exec_depend>elfin_ethercat_driver</exec_depend>
   <exec_depend>elfin_gazebo</exec_depend>
   <exec_depend>elfin3_ikfast_plugin</exec_depend>
