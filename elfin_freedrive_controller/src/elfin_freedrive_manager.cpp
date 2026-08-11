@@ -201,6 +201,7 @@ public:
         payload_hold_verified_(false),
         incident_lockout_latched_(false),
         model_maximum_gravity_effort_fraction_(0.90),
+        model_verified_payload_maximum_gravity_effort_fraction_(0.92),
         model_adaptive_entry_scale_(false),
         model_minimum_adaptive_scale_(0.75),
         model_maximum_adaptive_scale_(1.25),
@@ -696,14 +697,17 @@ private:
                         gravity_calibration_verified_, false);
     controller_nh.param("maximum_gravity_effort_fraction",
                         model_maximum_gravity_effort_fraction_, 0.90);
+    controller_nh.param("verified_payload_maximum_gravity_effort_fraction",
+                        model_verified_payload_maximum_gravity_effort_fraction_,
+                        0.92);
     controller_nh.param("adaptive_entry_scale",
                         model_adaptive_entry_scale_, false);
     controller_nh.param("minimum_adaptive_scale",
                         model_minimum_adaptive_scale_, 0.75);
     controller_nh.param("maximum_adaptive_scale",
                         model_maximum_adaptive_scale_, 1.25);
-    double effort_limit_scale = 0.20;
-    controller_nh.param("effort_limit_scale", effort_limit_scale, 0.20);
+    double effort_limit_scale = 1.0;
+    controller_nh.param("effort_limit_scale", effort_limit_scale, 1.0);
     std::vector<double> configured_effort_limits;
     controller_nh.getParam("effort_limits", configured_effort_limits);
     model_effort_limits_.assign(kJointCount, 0.0);
@@ -743,6 +747,10 @@ private:
         !finite(model_maximum_gravity_effort_fraction_) ||
         model_maximum_gravity_effort_fraction_ < 0.50 ||
         model_maximum_gravity_effort_fraction_ >= 1.0 ||
+        !finite(model_verified_payload_maximum_gravity_effort_fraction_) ||
+        model_verified_payload_maximum_gravity_effort_fraction_ <
+            model_maximum_gravity_effort_fraction_ ||
+        model_verified_payload_maximum_gravity_effort_fraction_ >= 1.0 ||
         !finite(model_minimum_adaptive_scale_) ||
         model_minimum_adaptive_scale_ <= 0.0 ||
         !finite(model_maximum_adaptive_scale_) ||
@@ -1323,6 +1331,9 @@ private:
                                    model_minimum_adaptive_scale_,
                                    model_maximum_adaptive_scale_);
     }
+    const double capacity_fraction = math::gravityCapacityFraction(
+        payload_hold_verified_, model_maximum_gravity_effort_fraction_,
+        model_verified_payload_maximum_gravity_effort_fraction_);
     bool gravity_capacity_valid = true;
     std::size_t limiting_joint = 0;
     double limiting_requested = 0.0;
@@ -1334,8 +1345,7 @@ private:
               observation.base_model_effort[joint] +
           gravity_bias_[joint] +
           current_payload_effort_[gravity_joint_to_chain_[joint]];
-      const double available = model_effort_limits_[joint] *
-                               model_maximum_gravity_effort_fraction_;
+      const double available = model_effort_limits_[joint] * capacity_fraction;
       const double ratio = std::abs(adapted_gravity) / available;
       if (ratio > limiting_ratio) {
         limiting_ratio = ratio;
@@ -1345,7 +1355,7 @@ private:
       }
       if (!math::gravityEffortHasCapacity(
               adapted_gravity, model_effort_limits_[joint],
-              model_maximum_gravity_effort_fraction_)) {
+              capacity_fraction)) {
         gravity_capacity_valid = false;
       }
     }
@@ -3235,6 +3245,7 @@ private:
   std::vector<double> model_effort_limits_;
   double model_gravity_scale_;
   double model_maximum_gravity_effort_fraction_;
+  double model_verified_payload_maximum_gravity_effort_fraction_;
   bool model_adaptive_entry_scale_;
   double model_minimum_adaptive_scale_;
   double model_maximum_adaptive_scale_;

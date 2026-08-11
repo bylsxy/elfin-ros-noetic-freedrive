@@ -42,7 +42,8 @@ Created on Mon Sep 17 11:15 2018
 namespace elfin_ethercat_driver {
 
 ElfinEtherCATIOClient::ElfinEtherCATIOClient(EtherCatManager *manager, int slave_no, const ros::NodeHandle &nh, std::string io_port_name):
-    manager_(manager), slave_no_(slave_no), io_nh_(nh, io_port_name)
+    manager_(manager), slave_no_(slave_no), io_nh_(nh, io_port_name),
+    digital_input_pdo_mapped_(false), digital_input_pdo_offset_(0)
 {
     // init pdo_input and output
     std::string name_pdo_input[5]={"Digital_Input", "Analog_Input_channel1", "Analog_Input_channel2",
@@ -67,6 +68,19 @@ ElfinEtherCATIOClient::ElfinEtherCATIOClient(EtherCatManager *manager, int slave
         pdo_output.push_back(unit_tmp);
     }
 
+    digital_input_pdo_mapped_ = manager_->findInputPdoEntryByteOffset(
+        slave_no_, 0x6001, 0x01, 16, digital_input_pdo_offset_);
+    if(digital_input_pdo_mapped_)
+    {
+        ROS_INFO("Verified slave %d DI PDO 0x6001:01 at byte offset %zu",
+                 slave_no_, digital_input_pdo_offset_);
+    }
+    else
+    {
+        ROS_WARN("Slave %d DI PDO mapping is not verified; read_di will use SDO 0x6001:01",
+                 slave_no_);
+    }
+
 
     // Initialize services
     read_sdo_=io_nh_.advertiseService("read_di", &ElfinEtherCATIOClient::readSDO_cb, this); // 20201117: support for 485 end
@@ -82,26 +96,51 @@ ElfinEtherCATIOClient::~ElfinEtherCATIOClient()
 
 }
 
-int16_t ElfinEtherCATIOClient::readInput_unit(int n)
+bool ElfinEtherCATIOClient::readInput_unit(int n, int16_t& value)
 {
+    value = 0;
+    if(n != elfin_io_txpdo::DIGITAL_INPUT)
+        return false;
 
-    int16_t map;
-    map = (manager_->readSDO<int16_t>(4, 0x6001, 0x01));// << 16; // read the end DI
-    // printf("map: %d\n", map);
-    return map;
+    if(digital_input_pdo_mapped_)
+    {
+        uint8_t bytes[2] = {0, 0};
+        if(manager_->readInputBytes(slave_no_, digital_input_pdo_offset_,
+                                    bytes, sizeof(bytes)))
+        {
+            const uint16_t raw = static_cast<uint16_t>(bytes[0]) |
+                (static_cast<uint16_t>(bytes[1]) << 8);
+            value = static_cast<int16_t>(raw);
+            return true;
+        }
+        ROS_WARN_THROTTLE(5.0,
+            "Verified slave %d DI PDO is temporarily unavailable; falling back to SDO 0x6001:01",
+            slave_no_);
+    }
+
+    return manager_->tryReadSDO<int16_t>(slave_no_, 0x6001, 0x01, value);
 }
 
-int32_t ElfinEtherCATIOClient::readOutput_unit(int n)
+bool ElfinEtherCATIOClient::readOutput_unit(int n, int32_t& value)
 {
-    int32_t map;
-    map = (manager_->readSDO<int32_t>(4, 0x7001, 0x01)) << 12; 
-    return map;
+    value = 0;
+    if(n < 0 || static_cast<std::size_t>(n) >= pdo_output.size())
+        return false;
+
+    uint16_t raw = 0;
+    if(!manager_->tryReadSDO<uint16_t>(slave_no_, 0x7001, 0x01, raw))
+        return false;
+    value = static_cast<int32_t>(static_cast<uint32_t>(raw) << 12);
+    return true;
 }
 
-void ElfinEtherCATIOClient::writeOutput_unit(int n, int32_t val)
+bool ElfinEtherCATIOClient::writeOutput_unit(int n, int32_t val)
 {
-
-    manager_->writeSDO<int32_t>(4,0x7001,0x01, val >> 12);
+    if(n < 0 || static_cast<std::size_t>(n) >= pdo_output.size())
+        return false;
+    const uint16_t raw = static_cast<uint16_t>(
+        (static_cast<uint32_t>(val) >> 12) & 0xffffU);
+    return manager_->writeSDO<uint16_t>(slave_no_, 0x7001, 0x01, raw) > 0;
 }
 
 // 20201116: read the end SDO
@@ -206,22 +245,44 @@ std::string ElfinEtherCATIOClient::getRxSDO()
 // 20201116: read the end SDO
 bool ElfinEtherCATIOClient::readSDO_cb(elfin_robot_msgs::ElfinIODRead::Request &req, elfin_robot_msgs::ElfinIODRead::Response &resp)
 {
-    resp.digital_input=readInput_unit(elfin_io_txpdo::DIGITAL_INPUT);//elfin_io_txpdo::DIGITAL_INPUT
+    int16_t value = 0;
+    if(!readInput_unit(elfin_io_txpdo::DIGITAL_INPUT, value))
+    {
+        resp.digital_input = 0;
+        ROS_ERROR_THROTTLE(1.0,
+            "Failed to read end-effector DI from EtherCAT slave %d",
+            slave_no_);
+        return false;
+    }
+    resp.digital_input = value;
     return true;
 }
 
-// 20201130: read the end DO
 bool ElfinEtherCATIOClient::readDO_cb(elfin_robot_msgs::ElfinIODRead::Request &req, elfin_robot_msgs::ElfinIODRead::Response &resp)
 {
-    resp.digital_input=readOutput_unit(elfin_io_txpdo::DIGITAL_INPUT); // 20201130: digital_input for convenience
+    int32_t value = 0;
+    if(!readOutput_unit(elfin_io_rxpdo::DIGITAL_OUTPUT, value))
+    {
+        resp.digital_input = 0;
+        ROS_ERROR_THROTTLE(1.0,
+            "Failed to read end-effector DO from EtherCAT slave %d",
+            slave_no_);
+        return false;
+    }
+    resp.digital_input = value;
     return true;
 }
 
-// 20201117: write the end SDO
 bool ElfinEtherCATIOClient::writeSDO_cb(elfin_robot_msgs::ElfinIODWrite::Request &req, elfin_robot_msgs::ElfinIODWrite::Response &resp)
 {
-    writeOutput_unit(elfin_io_rxpdo::DIGITAL_OUTPUT,req.digital_output);
-    resp.success=true;
+    resp.success = writeOutput_unit(
+        elfin_io_rxpdo::DIGITAL_OUTPUT, req.digital_output);
+    if(!resp.success)
+    {
+        ROS_ERROR_THROTTLE(1.0,
+            "Failed to write end-effector DO to EtherCAT slave %d",
+            slave_no_);
+    }
     return true;
 }
 

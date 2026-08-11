@@ -25,6 +25,7 @@ ElfinFreedriveController::ElfinFreedriveController()
       minimum_adaptive_scale_(0.50),
       maximum_adaptive_scale_(2.0),
       maximum_gravity_effort_fraction_(0.90),
+      verified_payload_maximum_gravity_effort_fraction_(0.92),
       limit_margin_(0.08),
       limit_stiffness_(5.0),
       limit_damping_(0.5),
@@ -205,6 +206,8 @@ bool ElfinFreedriveController::init(
                       maximum_adaptive_scale_, 2.0);
   controller_nh.param("maximum_gravity_effort_fraction",
                       maximum_gravity_effort_fraction_, 0.90);
+  controller_nh.param("verified_payload_maximum_gravity_effort_fraction",
+                      verified_payload_maximum_gravity_effort_fraction_, 0.92);
   controller_nh.param("require_model_validation",
                       require_model_validation_, true);
   controller_nh.param("allow_model_validation_warning",
@@ -261,6 +264,10 @@ bool ElfinFreedriveController::init(
       !std::isfinite(maximum_gravity_effort_fraction_) ||
       maximum_gravity_effort_fraction_ < 0.50 ||
       maximum_gravity_effort_fraction_ >= 1.0 ||
+      !std::isfinite(verified_payload_maximum_gravity_effort_fraction_) ||
+      verified_payload_maximum_gravity_effort_fraction_ <
+          maximum_gravity_effort_fraction_ ||
+      verified_payload_maximum_gravity_effort_fraction_ >= 1.0 ||
       !std::isfinite(hard_limit_margin_) || hard_limit_margin_ <= 0.0 ||
       hard_limit_margin_ >= limit_margin_ || limit_margin_ >= 0.5 ||
       !std::isfinite(hard_limit_toward_velocity_) ||
@@ -286,8 +293,8 @@ bool ElfinFreedriveController::init(
       static_cast<unsigned int>(minimum_validation_joints);
   velocity_limit_scale_.store(velocity_limit_scale);
 
-  double effort_limit_scale = 0.10;
-  controller_nh.param("effort_limit_scale", effort_limit_scale, 0.10);
+  double effort_limit_scale = 1.0;
+  controller_nh.param("effort_limit_scale", effort_limit_scale, 1.0);
   if (!std::isfinite(effort_limit_scale) || effort_limit_scale <= 0.0 ||
       effort_limit_scale > 1.0) {
     ROS_ERROR("effort_limit_scale must be in (0, 1]");
@@ -495,6 +502,9 @@ void ElfinFreedriveController::starting(const ros::Time& time) {
   if (valid_state &&
       dynamics_->JntToGravity(q_chain_, gravity_torque_chain_) >= 0 &&
       updatePayloadEffort()) {
+    const double capacity_fraction = math::gravityCapacityFraction(
+        payload_hold_verified_.load(), maximum_gravity_effort_fraction_,
+        verified_payload_maximum_gravity_effort_fraction_);
     std::vector<double> configured_gravity(joints_.size(), 0.0);
     for (std::size_t i = 0; i < joints_.size(); ++i) {
       configured_gravity[i] =
@@ -503,7 +513,7 @@ void ElfinFreedriveController::starting(const ros::Time& time) {
           gravity_bias_[i] + payload_effort_[joint_to_chain_[i]];
       if (!math::gravityEffortHasCapacity(
               configured_gravity[i], effort_limits_[i],
-              maximum_gravity_effort_fraction_)) {
+              capacity_fraction)) {
         gravity_capacity_valid_ = false;
       }
       initial_effort_[i] = math::clamp(
@@ -566,7 +576,7 @@ void ElfinFreedriveController::starting(const ros::Time& time) {
             gravity_bias_[i] + payload_effort_[joint_to_chain_[i]];
         if (!math::gravityEffortHasCapacity(
                 adapted_gravity, effort_limits_[i],
-                maximum_gravity_effort_fraction_)) {
+                capacity_fraction)) {
           gravity_capacity_valid_ = false;
           model_validation_passed_ = false;
           model_validation_warning_ = false;
@@ -903,6 +913,9 @@ void ElfinFreedriveController::update(
   handoff_progress_ = math::smoothStep(
       std::max(0.0, (time - started_time_).toSec()) / handoff_duration_);
 
+  const double capacity_fraction = math::gravityCapacityFraction(
+      payload_hold_verified_.load(), maximum_gravity_effort_fraction_,
+      verified_payload_maximum_gravity_effort_fraction_);
   bool gravity_capacity_exceeded = false;
   for (std::size_t i = 0; i < joints_.size(); ++i) {
     const double requested_gravity =
@@ -911,7 +924,7 @@ void ElfinFreedriveController::update(
         gravity_bias_[i] + payload_effort_[joint_to_chain_[i]];
     if (!math::gravityEffortHasCapacity(
             requested_gravity, effort_limits_[i],
-            maximum_gravity_effort_fraction_)) {
+            capacity_fraction)) {
       gravity_capacity_exceeded = true;
     }
     gravity_command_[i] = math::clamp(

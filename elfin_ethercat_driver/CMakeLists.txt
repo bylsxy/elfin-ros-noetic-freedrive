@@ -142,6 +142,8 @@ add_library(elfin_ethercat_driver
   include/${PROJECT_NAME}/elfin_ethercat_client.h
   include/${PROJECT_NAME}/elfin_ethercat_io_client.h
   include/${PROJECT_NAME}/elfin_ethercat_manager.h
+  include/${PROJECT_NAME}/sdo_result.h
+  include/${PROJECT_NAME}/pdo_mapping.h
 )
 
 
@@ -196,14 +198,12 @@ install(DIRECTORY include/${PROJECT_NAME}/
 ## Testing ##
 #############
 
-## Add gtest based cpp test target and link libraries
-# catkin_add_gtest(${PROJECT_NAME}-test test/test_elfin_ethercat_driver.cpp)
-# if(TARGET ${PROJECT_NAME}-test)
-#   target_link_libraries(${PROJECT_NAME}-test ${PROJECT_NAME})
-# endif()
-
-## Add folders to be run by python nosetests
-# catkin_add_nosetests(test)
+if(CATKIN_ENABLE_TESTING)
+  catkin_add_gtest(test_sdo_result test/test_sdo_result.cpp)
+  if(TARGET test_sdo_result)
+    target_link_libraries(test_sdo_result ${catkin_LIBRARIES})
+  endif()
+endif()
 
 
 

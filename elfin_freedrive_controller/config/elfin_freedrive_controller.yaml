@@ -1,7 +1,7 @@
 # This controller is deliberately loaded but not started by the normal bringup.
-# Explicit per-axis limits cover the validated empty-arm gravity envelope while
-# remaining far below the E05 URDF ratings. The controller rejects any pose
-# whose model gravity would consume 90% of one of these limits.
+# FREE torque is bounded by each E05 joint's URDF rated effort. Runtime gravity
+# capacity, torque-rate, velocity, joint-limit, Fault and manager gates remain
+# active independently.
 elfin_freedrive_controller:
   type: elfin_freedrive_controller/ElfinFreedriveController
   joints:
@@ -25,7 +25,7 @@ elfin_freedrive_controller:
   maximum_payload_mass: 5.0
   # Long, light tools are bounded by predicted joint effort instead of an
   # arbitrary center-distance cliff. Every candidate still has to pass the
-  # sampled path reserve, controlled hold, and per-cycle runtime capacity gate.
+  # actual hold-pose reserve, controlled hold, and per-cycle runtime capacity gate.
   # 2026-07-24: 17 passive CSP samples, 6 opposite-approach pose pairs.
   # J2/J3 leave-one-pose-out maximum errors: 0.507 / 1.159 Nm.
   gravity_calibration_verified: true
@@ -55,12 +55,13 @@ elfin_freedrive_controller:
   settle_handoff_duration: 0.10
   allow_model_validation_warning: true
   minimum_warning_alignment: 0.5
-  effort_limit_scale: 0.20
-  # J2 needs about 60-68 Nm around the 2026-07-25 high-load empty-arm pose.
-  # J3/J5 need 30.89/7.87 Nm on the measured 2026-07-26 tool path. These
-  # explicit limits remain below 20% of the E05 URDF ratings (40/13.8 Nm).
-  effort_limits: [15.0, 84.0, 36.0, 15.0, 10.0, 8.0]
+  # Use the E05 URDF rated joint efforts directly: [420, 420, 200, 200, 69, 69] Nm.
+  # Do not apply an additional percentage or historical per-axis software cap.
+  effort_limit_scale: 1.0
   maximum_gravity_effort_fraction: 0.90
+  # A profile that already passed the real motion-monitored hold may use a
+  # narrow 92% hysteresis band; unverified/candidate payloads remain on 90%.
+  verified_payload_maximum_gravity_effort_fraction: 0.92
   damping: [1.2, 1.2, 0.8, 0.35, 0.18, 0.18]
   damping_scales: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
   minimum_damping_scale: 0.05

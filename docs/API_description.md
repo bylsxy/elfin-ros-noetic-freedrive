@@ -95,7 +95,8 @@ example:
 	```
 
 * **elfin_ros_control/elfin/io_port1/read_di (elfin_robot_msgs/ElfinIODRead)**  
-从DI中读取内容  
+优先从 slave4 周期输入 PDO 读取 DI 原始字；旧 ESI 未映射输入 PDO 时回退 SDO。传输失败或返回长度不完整时，本服务调用失败，不会以 `0` 冒充有效输入。
+
 example:  
 	```
 	rosservice call /elfin_ros_control/elfin/io_port1/read_di "data: true"

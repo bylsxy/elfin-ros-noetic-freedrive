@@ -29,7 +29,9 @@
 
 
 #include "elfin_ethercat_driver/elfin_ethercat_manager.h"
+#include "elfin_ethercat_driver/sdo_result.h"
 
+#include <cstring>
 #include <unistd.h>
 #include <stdio.h>
 #include <time.h>
@@ -44,6 +46,8 @@
 #include <soem/ethercatdc.h>
 #include <soem/ethercatcoe.h>
 #include <soem/ethercatfoe.h>
+#include <elfin_ethercat_driver/pdo_mapping.h>
+
 #include <soem/ethercatconfig.h>
 #include <soem/ethercatprint.h>
 
@@ -62,105 +66,121 @@ void timespecInc(struct timespec &tick, int nsec)
     }
 }
 
+uint16_t expectedSlaveState(int slave)
+{
+  return slave == 4 ? EC_STATE_SAFE_OP : EC_STATE_OPERATIONAL;
+}
+
 void handleErrors()
 {
-  /* one ore more slaves are not responding */
   ec_group[0].docheckstate = FALSE;
   ec_readstate();
-  for (int slave = 1; slave <= ec_slavecount; slave++)
+  for (int slave = 1; slave <= ec_slavecount; ++slave)
   {
-    if ((ec_slave[slave].group == 0) && (ec_slave[slave].state != EC_STATE_OPERATIONAL) && slave != 4)
+    const uint16_t expected_state = expectedSlaveState(slave);
+    if (ec_slave[slave].group == 0 &&
+        ec_slave[slave].state != expected_state)
     {
       ec_group[0].docheckstate = TRUE;
       if (ec_slave[slave].state == (EC_STATE_SAFE_OP + EC_STATE_ERROR))
       {
-        fprintf(stderr, "ERROR : slave %d is in SAFE_OP + ERROR, attempting ack.\n", slave);
+        fprintf(stderr,
+                "ERROR : slave %d is in SAFE_OP + ERROR, attempting ack.\n",
+                slave);
         ec_slave[slave].state = (EC_STATE_SAFE_OP + EC_STATE_ACK);
         ec_writestate(slave);
       }
-      else if(ec_slave[slave].state == EC_STATE_SAFE_OP && slave != 4)
+      else if (ec_slave[slave].state == EC_STATE_SAFE_OP &&
+               expected_state == EC_STATE_OPERATIONAL)
       {
-        fprintf(stderr, "WARNING : slave %d is in SAFE_OP, change to OPERATIONAL.\n", slave);
+        fprintf(stderr,
+                "WARNING : slave %d is in SAFE_OP, changing to OPERATIONAL.\n",
+                slave);
         ec_slave[slave].state = EC_STATE_OPERATIONAL;
         ec_writestate(slave);
       }
-      else if(slave == 4 && ec_slave[slave].state != EC_STATE_SAFE_OP)
+      else if (ec_slave[slave].state == EC_STATE_OPERATIONAL &&
+               expected_state == EC_STATE_SAFE_OP)
       {
-        fprintf(stderr, "WARNING : slave %d is no in SAFE_OP, change to SAFE_OP.\n", slave);
+        fprintf(stderr,
+                "WARNING : I/O slave %d is OPERATIONAL, restoring SAFE_OP.\n",
+                slave);
         ec_slave[slave].state = EC_STATE_SAFE_OP;
         ec_writestate(slave);
       }
-      else if(ec_slave[slave].state > 0)
+      else if (ec_slave[slave].state > 0)
       {
         if (ec_reconfig_slave(slave, EC_TIMEOUTMON))
         {
+          ec_slave[slave].state = expected_state;
+          ec_writestate(slave);
+          ec_statecheck(slave, expected_state, EC_TIMEOUTRET);
           ec_slave[slave].islost = FALSE;
-          printf("MESSAGE : slave %d reconfigured\n",slave);
+          printf("MESSAGE : slave %d reconfigured\n", slave);
         }
       }
-      else if(!ec_slave[slave].islost)
+      else if (!ec_slave[slave].islost)
       {
-        /* re-check state */
-        ec_statecheck(slave, EC_STATE_OPERATIONAL, EC_TIMEOUTRET);
+        ec_statecheck(slave, expected_state, EC_TIMEOUTRET);
         if (!ec_slave[slave].state)
         {
           ec_slave[slave].islost = TRUE;
-          fprintf(stderr, "ERROR : slave %d lost\n",slave);
+          fprintf(stderr, "ERROR : slave %d lost\n", slave);
         }
       }
     }
     if (ec_slave[slave].islost)
     {
-      if(!ec_slave[slave].state)
+      if (!ec_slave[slave].state)
       {
         if (ec_recover_slave(slave, EC_TIMEOUTMON))
         {
+          ec_slave[slave].state = expected_state;
+          ec_writestate(slave);
+          ec_statecheck(slave, expected_state, EC_TIMEOUTRET);
           ec_slave[slave].islost = FALSE;
-          printf("MESSAGE : slave %d recovered\n",slave);
+          printf("MESSAGE : slave %d recovered\n", slave);
         }
       }
       else
       {
         ec_slave[slave].islost = FALSE;
-        printf("MESSAGE : slave %d found\n",slave);
+        printf("MESSAGE : slave %d found\n", slave);
       }
     }
   }
 }
 
-void cycleWorker(boost::mutex& mutex, bool& stop_flag)
+void cycleWorker(boost::mutex& mutex, boost::atomic<bool>& stop_flag)
 {
-  // 1ms in nanoseconds
-  double period = THREAD_SLEEP_TIME * 1000;
-  // get current time
+  const double period = THREAD_SLEEP_TIME * 1000;
   struct timespec tick;
   clock_gettime(CLOCK_REALTIME, &tick);
   timespecInc(tick, period);
-  // time for checking overrun
   struct timespec before;
   double overrun_time;
-  while (!stop_flag) 
+  while (!stop_flag.load(boost::memory_order_acquire))
   {
-    int expected_wkc = (ec_group[0].outputsWKC * 2) + ec_group[0].inputsWKC;
-    int sent, wkc;
+    const int expected_wkc =
+        (ec_group[0].outputsWKC * 2) + ec_group[0].inputsWKC;
     {
       boost::mutex::scoped_lock lock(mutex);
-      sent = ec_send_processdata();
-      wkc = ec_receive_processdata(EC_TIMEOUTRET);
+      ec_send_processdata();
+      const int wkc = ec_receive_processdata(EC_TIMEOUTRET);
+      if (wkc < expected_wkc)
+      {
+        handleErrors();
+      }
     }
 
-    if (wkc < expected_wkc)
-    {
-      handleErrors();
-    }
-
-    // check overrun
     clock_gettime(CLOCK_REALTIME, &before);
-    overrun_time = (before.tv_sec + double(before.tv_nsec)/NSEC_PER_SECOND) -  (tick.tv_sec + double(tick.tv_nsec)/NSEC_PER_SECOND);
+    overrun_time =
+        (before.tv_sec + double(before.tv_nsec) / NSEC_PER_SECOND) -
+        (tick.tv_sec + double(tick.tv_nsec) / NSEC_PER_SECOND);
     if (overrun_time > 0.0)
     {
-      tick.tv_sec=before.tv_sec;
-      tick.tv_nsec=before.tv_nsec;
+      tick.tv_sec = before.tv_sec;
+      tick.tv_nsec = before.tv_nsec;
     }
     clock_nanosleep(CLOCK_REALTIME, TIMER_ABSTIME, &tick, NULL);
     timespecInc(tick, period);
@@ -198,17 +218,14 @@ EtherCatManager::EtherCatManager(const std::string& ifname)
 
 EtherCatManager::~EtherCatManager()
 {
-  stop_flag_ = true;
-
-  // Request init operational state for all slaves
-  ec_slave[0].state = EC_STATE_INIT;
-
-  /* request init state for all slaves */
-  ec_writestate(0);
-
-  //stop SOEM, close socket
-  ec_close();
+  stop_flag_.store(true, boost::memory_order_release);
   cycle_thread_.join();
+
+  boost::mutex::scoped_lock io_lock(iomap_mutex_);
+  boost::mutex::scoped_lock mailbox_lock(mailbox_mutex_);
+  ec_slave[0].state = EC_STATE_INIT;
+  ec_writestate(0);
+  ec_close();
 }
 
 bool EtherCatManager::initSoem(const std::string& ifname) {
@@ -325,6 +342,84 @@ uint8_t EtherCatManager::readInput(int slave_no, uint8_t channel) const
   return ec_slave[slave_no].inputs[channel];
 }
 
+bool EtherCatManager::readInputBytes(int slave_no, std::size_t channel,
+                                    uint8_t* values,
+                                    std::size_t length) const
+{
+  if (values == NULL || length == 0)
+  {
+    return false;
+  }
+  std::memset(values, 0, length);
+  boost::mutex::scoped_lock lock(iomap_mutex_);
+  if (slave_no < 1 || slave_no > ec_slavecount ||
+      ec_slave[slave_no].inputs == NULL ||
+      channel + length > static_cast<std::size_t>(ec_slave[slave_no].Ibytes))
+  {
+    return false;
+  }
+  std::memcpy(values, ec_slave[slave_no].inputs + channel, length);
+  return true;
+}
+
+bool EtherCatManager::findInputPdoEntryByteOffset(
+    int slave_no, uint16_t index, uint8_t subidx, uint8_t bit_length,
+    std::size_t& byte_offset) const
+{
+  uint8_t input_start_bit = 0;
+  {
+    boost::mutex::scoped_lock lock(iomap_mutex_);
+    if (slave_no < 1 || slave_no > ec_slavecount ||
+        ec_slave[slave_no].inputs == NULL)
+    {
+      return false;
+    }
+    input_start_bit = ec_slave[slave_no].Istartbit;
+  }
+
+  byte_offset = 0;
+  uint8_t assignment_count = 0;
+  if (!tryReadSDO<uint8_t>(slave_no, 0x1c13, 0x00, assignment_count) ||
+      assignment_count == 0)
+  {
+    return false;
+  }
+
+  std::vector<uint32_t> mappings;
+  for (uint16_t assignment = 1; assignment <= assignment_count; ++assignment)
+  {
+    uint16_t pdo_index = 0;
+    if (!tryReadSDO<uint16_t>(slave_no, 0x1c13,
+                              static_cast<uint8_t>(assignment), pdo_index))
+    {
+      return false;
+    }
+    if (pdo_index == 0)
+    {
+      continue;
+    }
+
+    uint8_t mapping_count = 0;
+    if (!tryReadSDO<uint8_t>(slave_no, pdo_index, 0x00, mapping_count))
+    {
+      return false;
+    }
+    for (uint16_t entry = 1; entry <= mapping_count; ++entry)
+    {
+      uint32_t mapping = 0;
+      if (!tryReadSDO<uint32_t>(slave_no, pdo_index,
+                                static_cast<uint8_t>(entry), mapping))
+      {
+        return false;
+      }
+      mappings.push_back(mapping);
+    }
+  }
+
+  return detail::findPdoEntryByteOffset(
+      mappings, input_start_bit, index, subidx, bit_length, byte_offset);
+}
+
 uint8_t EtherCatManager::readOutput(int slave_no, uint8_t channel) const
 {
   boost::mutex::scoped_lock lock(iomap_mutex_);
@@ -340,24 +435,58 @@ uint8_t EtherCatManager::readOutput(int slave_no, uint8_t channel) const
 }
 
 template <typename T>
-uint8_t EtherCatManager::writeSDO(int slave_no, uint16_t index, uint8_t subidx, T value) const
+uint8_t EtherCatManager::writeSDO(int slave_no, uint16_t index,
+                                  uint8_t subidx, T value) const
 {
-  int ret;
-  ret = ec_SDOwrite(slave_no, index, subidx, FALSE, sizeof(value), &value, EC_TIMEOUTSAFE);
-  return ret;
+  boost::mutex::scoped_lock lock(mailbox_mutex_);
+  const int ret = ec_SDOwrite(slave_no, index, subidx, FALSE, sizeof(value),
+                              &value, EC_TIMEOUTSAFE);
+  if (ret <= 0)
+  {
+    fprintf(stderr,
+            "Failed to write SDO ret:%d, slave_no:%d, index:0x%04x, "
+            "subidx:0x%02x\n",
+            ret, slave_no, index, subidx);
+  }
+  return static_cast<uint8_t>(ret);
 }
 
 template <typename T>
-T EtherCatManager::readSDO(int slave_no, uint16_t index, uint8_t subidx) const
+bool EtherCatManager::tryReadSDO(int slave_no, uint16_t index,
+                                 uint8_t subidx, T& value) const
 {
-  int ret, l;
-  T val;
-  l = sizeof(val);
-  ret = ec_SDOread(slave_no, index, subidx, FALSE, &l, &val, EC_TIMEOUTRXM);
-  if ( ret <= 0 ) { // ret = Workcounter from last slave response
-    fprintf(stderr, "Failed to read from ret:%d, slave_no:%d, index:0x%04x, subidx:0x%02x\n", ret, slave_no, index, subidx);
+  T candidate = T();
+  int length = sizeof(candidate);
+  int ret;
+  {
+    boost::mutex::scoped_lock lock(mailbox_mutex_);
+    ret = ec_SDOread(slave_no, index, subidx, FALSE, &length, &candidate,
+                     EC_TIMEOUTRXM);
   }
-  return val;
+  if (!detail::acceptSdoReadResult(ret, length, candidate, value))
+  {
+    fprintf(stderr,
+            "Failed to read SDO ret:%d, size:%d/%zu, slave_no:%d, "
+            "index:0x%04x, subidx:0x%02x\n",
+            ret, length, sizeof(candidate), slave_no, index, subidx);
+    return false;
+  }
+  return true;
+}
+
+template <typename T>
+T EtherCatManager::readSDO(int slave_no, uint16_t index,
+                           uint8_t subidx) const
+{
+  T value = T();
+  if (!tryReadSDO(slave_no, index, subidx, value))
+  {
+    fprintf(stderr,
+            "Failed to read SDO from slave_no:%d, index:0x%04x, "
+            "subidx:0x%02x\n",
+            slave_no, index, subidx);
+  }
+  return value;
 }
 
 template uint8_t EtherCatManager::writeSDO<char> (int slave_no, uint16_t index, uint8_t subidx, char value) const;
@@ -378,6 +507,15 @@ template unsigned char EtherCatManager::readSDO<unsigned char> (int slave_no, ui
 template unsigned int EtherCatManager::readSDO<unsigned int> (int slave_no, uint16_t index, uint8_t subidx) const;
 template unsigned short EtherCatManager::readSDO<unsigned short> (int slave_no, uint16_t index, uint8_t subidx) const;
 template unsigned long EtherCatManager::readSDO<unsigned long> (int slave_no, uint16_t index, uint8_t subidx) const;
+
+template bool EtherCatManager::tryReadSDO<char> (int slave_no, uint16_t index, uint8_t subidx, char& value) const;
+template bool EtherCatManager::tryReadSDO<int> (int slave_no, uint16_t index, uint8_t subidx, int& value) const;
+template bool EtherCatManager::tryReadSDO<short> (int slave_no, uint16_t index, uint8_t subidx, short& value) const;
+template bool EtherCatManager::tryReadSDO<long> (int slave_no, uint16_t index, uint8_t subidx, long& value) const;
+template bool EtherCatManager::tryReadSDO<unsigned char> (int slave_no, uint16_t index, uint8_t subidx, unsigned char& value) const;
+template bool EtherCatManager::tryReadSDO<unsigned int> (int slave_no, uint16_t index, uint8_t subidx, unsigned int& value) const;
+template bool EtherCatManager::tryReadSDO<unsigned short> (int slave_no, uint16_t index, uint8_t subidx, unsigned short& value) const;
+template bool EtherCatManager::tryReadSDO<unsigned long> (int slave_no, uint16_t index, uint8_t subidx, unsigned long& value) const;
 
 }
 

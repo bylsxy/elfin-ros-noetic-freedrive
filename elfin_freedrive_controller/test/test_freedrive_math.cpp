@@ -62,12 +62,21 @@ TEST(ElfinFreedriveMath, VelocityScaleHasExplicitSafeBounds) {
 }
 
 TEST(ElfinFreedriveMath, GravityEffortCapacityHasReservedHeadroom) {
-  EXPECT_TRUE(math::gravityEffortHasCapacity(58.5, 65.0, 0.90));
-  EXPECT_TRUE(math::gravityEffortHasCapacity(-58.5, 65.0, 0.90));
+  EXPECT_TRUE(math::gravityEffortHasCapacity(58.49, 65.0, 0.90));
+  EXPECT_TRUE(math::gravityEffortHasCapacity(-58.49, 65.0, 0.90));
+  EXPECT_FALSE(math::gravityEffortHasCapacity(58.5, 65.0, 0.90));
   EXPECT_FALSE(math::gravityEffortHasCapacity(58.6, 65.0, 0.90));
   EXPECT_FALSE(math::gravityEffortHasCapacity(
       std::numeric_limits<double>::quiet_NaN(), 65.0, 0.90));
   EXPECT_FALSE(math::gravityEffortHasCapacity(10.0, 0.0, 0.90));
+}
+
+TEST(ElfinFreedriveMath, VerifiedPayloadGetsBoundedCapacityHysteresis) {
+  EXPECT_DOUBLE_EQ(math::gravityCapacityFraction(false, 0.90, 0.92), 0.90);
+  EXPECT_DOUBLE_EQ(math::gravityCapacityFraction(true, 0.90, 0.92), 0.92);
+  EXPECT_FALSE(math::gravityEffortHasCapacity(32.61, 36.0, 0.90));
+  EXPECT_TRUE(math::gravityEffortHasCapacity(32.61, 36.0, 0.92));
+  EXPECT_FALSE(math::gravityEffortHasCapacity(33.13, 36.0, 0.92));
 }
 
 TEST(ElfinFreedriveMath, HardLimitBandAllowsMotionAwayFromEntryPose) {
@@ -92,12 +101,12 @@ TEST(ElfinFreedriveMath, HardLimitBandStopsMotionTowardOrBeyondLimit) {
       3.141, 0.0, 3.121, -3.14, 3.14, 0.02, 0.02, 0.003));
 }
 
-TEST(ElfinFreedriveMath, E05HighLoadJ2PoseFitsTwentyPercentEnvelope) {
-  // The 2026-07-25 empty-arm log required about 67.3 Nm at J2. The E05
-  // 420 Nm URDF rating leaves an 84 Nm controller envelope at 20%, and the
-  // 90% gravity guard still retains 8.4 Nm for damping and transients.
-  EXPECT_TRUE(math::gravityEffortHasCapacity(67.3, 84.0, 0.90));
-  EXPECT_FALSE(math::gravityEffortHasCapacity(75.7, 84.0, 0.90));
+TEST(ElfinFreedriveMath, E05HighLoadJ2PoseFitsRatedEffortEnvelope) {
+  // FREE uses the E05 URDF-rated J2 effort of 420 Nm. The 90% gravity guard
+  // rejects only models that would consume 378 Nm or more.
+  EXPECT_TRUE(math::gravityEffortHasCapacity(67.3, 420.0, 0.90));
+  EXPECT_TRUE(math::gravityEffortHasCapacity(377.9, 420.0, 0.90));
+  EXPECT_FALSE(math::gravityEffortHasCapacity(378.0, 420.0, 0.90));
 }
 
 TEST(ElfinFreedriveMath, GravityValidationDetectsOppositeTorque) {
@@ -124,6 +133,36 @@ TEST(ElfinFreedriveMath, GravityValidationDetectsOppositeTorque) {
   EXPECT_NEAR(rejected.scale_estimate, -1.2, 1e-12);
   EXPECT_FALSE(math::gravityValidationAccepted(
       rejected, 2, 0.9, 0.5, 2.0, 0.5));
+}
+
+TEST(ElfinFreedriveMath, GravityValidationDoesNotTreatZeroAsOppositeTorque) {
+  const std::vector<double> model{10.0, -4.0, 2.0};
+  const std::vector<double> measured{12.0, -4.8, 0.0};
+
+  const auto result =
+      math::validateGravityObservation(model, measured, 0.5);
+  EXPECT_TRUE(result.sufficient_excitation);
+  EXPECT_EQ(result.excited_joints, 3U);
+  EXPECT_EQ(result.direction_mismatches, 0U);
+  EXPECT_TRUE(math::gravityValidationAccepted(
+      result, 2, 0.9, 0.5, 2.0, 0.5));
+}
+
+TEST(ElfinFreedriveMath, ZeroFeedbackIncidentSampleKeepsTorqueDirectionValid) {
+  const std::vector<double> model{
+      -2.1661004153544772e-16, -39.781041049521875, 21.356492883359934,
+      2.2679095644800764, 2.213472407823093, 0.18970495482057267};
+  const std::vector<double> measured{
+      -2.986723570157841, -46.63271067539775, 23.09930735022279,
+      0.0, 2.276049214243461, 0.06954594821299465};
+
+  const auto result =
+      math::validateGravityObservation(model, measured, 1.5);
+  EXPECT_TRUE(result.sufficient_excitation);
+  EXPECT_EQ(result.excited_joints, 4U);
+  EXPECT_EQ(result.direction_mismatches, 0U);
+  EXPECT_TRUE(math::gravityValidationAccepted(
+      result, 2, 0.9, 0.5, 2.0, 0.3));
 }
 
 TEST(ElfinFreedriveMath, GravityValidationRequiresExcitation) {

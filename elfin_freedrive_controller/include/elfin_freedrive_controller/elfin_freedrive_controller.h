@@ -129,6 +129,7 @@ private:
   double minimum_adaptive_scale_;
   double maximum_adaptive_scale_;
   double maximum_gravity_effort_fraction_;
+  double verified_payload_maximum_gravity_effort_fraction_;
   double limit_margin_;
   double limit_stiffness_;
   double limit_damping_;

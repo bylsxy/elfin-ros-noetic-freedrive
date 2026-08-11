@@ -88,7 +88,7 @@ elfin_ethercat_driver/src/elfin_ethercat_io_client.cpp
 
 | ROS 服务 | 活动源码行为 | 结论 |
 | --- | --- | --- |
-| `/elfin_ros_control/elfin/io_port1/read_di` | 读 slave 4 的 `0x6001:01`，直接返回 16 位值 | 可读数字输入原始字；新版 Panel 不再错误右移 16 位 |
+| `/elfin_ros_control/elfin/io_port1/read_di` | 优先从 slave 4 的周期输入 PDO 读取 `0x6001:01` 对应的前 16 位；仅在旧 ESI 未映射输入 PDO 时回退到 SDO | 可读数字输入原始字；PDO/SDO 传输或长度校验失败时 ROS 服务失败，不再返回伪造的 `0` |
 | `/elfin_ros_control/elfin/io_port1/read_do` | 读 slave 4 的 `0x7001:01`，左移 12 位返回 | 可回读数字输出寄存器 |
 | `/elfin_ros_control/elfin/io_port1/write_do` | 请求值右移 12 位后写 `0x7001:01` | Panel 仅开放 DO0..2，并采用“读原值、改单个位、写后回读” |
 | `/elfin_ros_control/elfin/io_port1/get_txpdo` | 返回 20 字节全零字符串 | 占位实现，不是真实 PDO |
@@ -96,8 +96,8 @@ elfin_ethercat_driver/src/elfin_ethercat_io_client.cpp
 
 源码还存在这些限制：
 
-- 构造函数保存了 `slave_no_`，但实际 I/O 读写硬编码 slave 4。
-- `readInput_unit(int n)` 忽略参数 `n`，始终只读数字输入，所以 `AI0/AI1` 和 `Smart_Camera_X/Y` 名称没有实际数据实现。
+- 构造函数的状态门禁使用 `slave_no_`，但实际寄存器读写仍固定为厂家 E05 I/O slave 4；当前 bringup 也固定把该客户端绑定到 slave 4。
+- `readInput_unit(int n)` 仍只实现数字输入；参数 `n` 仅用于拒绝未实现的 AI/相机通道，不会再为这些通道返回伪造数据。
 - RS-485 只有物理 A/B 端子，没有帧格式、波特率、设备协议或 ROS 节点。
 - 旧 Modbus 函数和 `L_4/H_4 is button DI` 注释没有被当前活动服务调用，只能作为历史线索。
 
@@ -140,11 +140,11 @@ elfin_ethercat_driver/src/elfin_ethercat_io_client.cpp
 
 进入条件包括：六轴状态新鲜完整、速度低于 `0.02 rad/s`、Servo On、无 Fault、位置控制器在线、本次真机启动显式允许 freedrive，并且位置模式下的反馈保持力矩通过 KDL 方向/比例/残差预检。管理器用 `STRICT` 原子切换保证位置控制与力矩控制不会同时占用六轴。FREE 松开或保护触发后先请求增强阻尼；正常恢复状态为 `EXITING -> READY`，保护恢复为 `RECOVERING -> READY`，真机直接切回失败时可短暂显示 `HOLDING`，表示驱动器已用当前编码器位置进入 CSP 且管理器正在恢复 ROS 位置控制器。只有位置保持完全无法建立时才请求 Servo Off。
 
-控制器每周期按当前六轴角度重新计算 URDF/KDL 重力力矩，并叠加阻尼、软关节限位和超速阻尼；活动拖拽没有位置弹簧。CST 入口先沿用位置模式实测保持力矩，再用 0.5 秒平滑过渡到固定的多姿态标定模型。本机空载 J2/J3 已用 17 个 CSP 静态样本、6 组相反到达方向的姿态中心完成标定；显式每轴上限为 `[15, 84, 36, 15, 10, 8] Nm`，模型重力达到其中任一轴 90% 时拒绝/退出。每次试验 CSV 默认保存在 `$ROS_HOME/elfin_freedrive_trials/`，未设置 `ROS_HOME` 时为 `~/.ros/elfin_freedrive_trials/`。2026-07-25 已完成人工空载拖动并依据日志关闭会误学预载的入口自适应；新末端候选已通过离线测量和容量复算，仍待最多 1 秒真机保持验证；实体灯环是否由固件自动变蓝也尚未验证。详见 `docs/e05_freedrive_calibration_2026-07-24.md`。
+控制器每周期按当前六轴角度重新计算 URDF/KDL 重力力矩，并叠加阻尼、软关节限位和超速阻尼；活动拖拽没有位置弹簧。CST 入口先沿用位置模式实测保持力矩，再用 0.5 秒平滑过渡到固定的多姿态标定模型。FREE 输出直接采用 E05 URDF 六轴额定力矩 `[420, 420, 200, 200, 69, 69] Nm`，不再叠加历史 20% 或 `[15, 84, 36, 15, 10, 8] Nm` 人工帽；未验证模型重力达到额定值 90% 时拒绝/退出，已验证负载使用 92% 迟滞线。每次试验 CSV 默认保存在 `$ROS_HOME/elfin_freedrive_trials/`，未设置 `ROS_HOME` 时为 `~/.ros/elfin_freedrive_trials/`。2026-08-11 候选 J5 `9.411 Nm` 的反复拒绝已确认来自旧 `10 Nm` 人工帽，而非测量失败。
 
 旧硬件接口曾把反馈 `axis.effort` 转为目标力矩，导致 effort 控制器命令没有真正写入 EtherCAT。现已改为 `axis.effort_cmd`，并在 CST 入口预置实测保持力矩、CSP 入口同步当前编码器位置、饱和目标力矩 PDO。2026-07-24 空载真机静态试验已验证完整交接和恢复，但带载与人工手感仍须分开验收。
 
-Panel“拖拽高级”已接入自动末端负载标定。它在普通位置控制下用 6 个双向姿态拟合总质量和法兰三维重心，再用 2 个独立姿态、路径力矩容量和最长 1 秒高阻尼保持做验证；成功后保存到 `~/.ros/elfin_freedrive_payload.yaml`。它不能识别未知末端外形，也不能把姿态相关的柔性线缆拉力精确化为固定重心，完整边界见 `docs/e05_automatic_payload_calibration.md`。
+Panel“拖拽高级”已接入自动末端负载标定。它在普通位置控制下用 6 个双向姿态拟合总质量和法兰三维重心，再用 2 个独立姿态、实际短时保持姿态 88% 容量余量和最长 1 秒高阻尼保持做验证；完整激励路径容量保留为诊断。成功后保存到 `~/.ros/elfin_freedrive_payload.yaml`。普通 FREE 在入口和运行中逐周期仍以 90% 容量硬门禁拒绝/退出。它不能识别未知末端外形，也不能把姿态相关的柔性线缆拉力精确化为固定重心，完整边界见 `docs/e05_automatic_payload_calibration.md`。
 
 ### 7.3 三个双轴模块
 

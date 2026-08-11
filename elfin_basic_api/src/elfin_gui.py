@@ -41,6 +41,7 @@ Created on Fri Jul 28 12:18:05 2017
 # author: Cong Liu
 
 from __future__ import division
+import csv
 import glob
 import rospy
 import math
@@ -76,7 +77,16 @@ class MyFrame(wx.Frame):
     POINT_DI_BIT=4
     FREE_DI_BIT=5
     DRIVER_STATE_TIMEOUT=0.75
-    PAYLOAD_CALIBRATION_MINIMUM_FLANGE_HEIGHT=0.65
+    PAYLOAD_CALIBRATION_MINIMUM_FLANGE_HEIGHT=0.45
+    PAYLOAD_CALIBRATION_POSE_NAMES=frozenset((
+        '拟合 A 低负载中性腕',
+        '拟合 B 中负载正俯仰',
+        '拟合 C 高负载正腕姿',
+        '拟合 D 高负载负腕姿',
+        '拟合 E 中负载负俯仰',
+        '留出 F 交叉腕姿',
+        '留出 G 实际工作姿态',
+    ))
     def __init__(self,parent,id):  
         wx.Frame.__init__(self,parent,id,'Elfin E05 新手控制面板',pos=(120,60))
         # Keep the session log visible even when the controls are taller than
@@ -858,13 +868,13 @@ class MyFrame(wx.Frame):
         self.payload_calibration_start_btn=wx.Button(
             self.advanced_dlg, label='高位一键标定未知末端')
         self.payload_calibration_start_btn.SetToolTip(
-            '要求法兰已高于 0.65 m；清场确认后，以 1%-5% 位置控制速度自动走高位双向姿态；'
-            '拟合、留出检验和最多 1 秒零力保持全部通过后才启用')
+            '要求法兰高于 0.45 m；以 5% 位置控制速度走 5 个拟合和 2 个留出姿态；'
+            '每段都复核 MoveIt、全臂 z=0 与当前 STEP 包络 z=0.30 m 门禁')
         self.payload_calibration_resume_btn=wx.Button(
             self.advanced_dlg, label='复用最近样本，仅做短时验证')
         self.payload_calibration_resume_btn.SetToolTip(
-            '适用于完整标定运动已经走完、只因软件容量边界被拒绝的情况；'
-            '要求末端和线缆自该样本后完全未改变，只重算并做最多 1 秒高阻尼保持')
+            '只接受当前 7 姿态版本的完整样本；末端和线缆必须保持不变；'
+            '低位时先以 5% 经 MoveIt 抬到实际工作姿态，再做最多 1 秒保持')
         self.payload_calibration_cancel_btn=wx.Button(
             self.advanced_dlg, label='中止标定')
         self.payload_calibration_cancel_btn.SetToolTip(
@@ -1111,11 +1121,19 @@ class MyFrame(wx.Frame):
     def latest_payload_sample_path():
         pattern=os.path.expanduser(
             '~/.ros/elfin_payload_calibration_runs/*/static_pairs.csv')
-        candidates=[
-            path for path in glob.glob(pattern) if os.path.isfile(path)]
-        if not candidates:
-            return None
-        return max(candidates, key=os.path.getmtime)
+        candidates=sorted(
+            (path for path in glob.glob(pattern) if os.path.isfile(path)),
+            key=os.path.getmtime,
+            reverse=True)
+        for path in candidates:
+            try:
+                with open(path, newline='') as source:
+                    names={row.get('pose') for row in csv.DictReader(source)}
+            except (OSError, csv.Error):
+                continue
+            if names==MyFrame.PAYLOAD_CALIBRATION_POSE_NAMES:
+                return path
+        return None
 
     def request_payload_calibration(self, event=None, resume_samples=False):
         with self.payload_calibration_lock:
@@ -1151,11 +1169,12 @@ class MyFrame(wx.Frame):
             self.show_local_result(
                 False, '无法核对标定起点的法兰高度：'+str(error))
             return
-        if flange_height < self.PAYLOAD_CALIBRATION_MINIMUM_FLANGE_HEIGHT:
+        if (not resume_samples and
+                flange_height < self.PAYLOAD_CALIBRATION_MINIMUM_FLANGE_HEIGHT):
             self.show_local_result(
                 False,
                 '当前法兰高度 {:.3f} m，低于自动标定门限 {:.3f} m。'
-                '请先用普通位置点动把末端移到上半工作区；脚本不会在未知末端外形下从低位自行抬升。'.format(
+                '请先用普通位置点动把末端移到上半工作区；完整标定不会在未知末端外形下从低位自行抬升。'.format(
                     flange_height,
                     self.PAYLOAD_CALIBRATION_MINIMUM_FLANGE_HEIGHT))
             return
@@ -1164,28 +1183,28 @@ class MyFrame(wx.Frame):
         if resume_samples:
             sample_path=self.latest_payload_sample_path()
             if sample_path is None:
-                self.show_local_result(False, '没有找到可复用的 static_pairs.csv。')
+                self.show_local_result(False, '没有找到与当前 7 姿态轨迹兼容的完整 static_pairs.csv。')
                 return
             message=(
-                '本次不会重走 32 次标定轨迹，只会重新计算下列完整样本，并在当前姿态做一次不超过 1 秒的高阻尼 FREE 保持：\n\n'
+                '本次不会重走当前 7 姿态轨迹，只会重新计算下列完整样本，并在实际工作姿态做一次不超过 1 秒的高阻尼 FREE 保持：\n\n'
                 '{}\n\n'
                 '继续即确认：\n'
                 '1. 当前末端、转接件和线缆与该样本采集时完全相同，期间没有拆装、移动或增减物体；\n'
-                '2. 当前机械臂静止、法兰高度 {:.3f} m，末端下方有机械防坠或人员仅在扫掠区外用牵引绳兜底；\n'
-                '3. 扫掠区和夹点已清空，专人守上游电闸，所有人均离开连杆和末端可能移动的区域；\n'
-                '4. 程序仍会先检查样本、MoveIt 自碰撞、Servo/Fault、当前姿态容量和静态力矩一致性；任一不符都不会进入 FREE。\n\n'
+                '2. 当前机械臂静止、法兰高度 {:.3f} m；若低于 0.45 m，程序会先以 5% 经 MoveIt 抬到实际工作姿态，轨迹不得比当前高度再下降超过 15 mm；\n'
+                '3. 抬升及保持区域、夹点已经清空，专人守上游电闸，所有人均离开连杆和末端可能移动的区域；\n'
+                '4. 每段仍检查 MoveIt、全臂 z=0 与当前 STEP 包络 z=0.30 m 门禁；任一不符都不会进入 FREE。\n\n'
                 '末端或线缆有任何变化，请选择“否”并重新执行完整标定。').format(
                     sample_path, flange_height)
             dialog_title='确认复用负载样本并短时验证'
         else:
             message=(
-                '标定会自主移动真实机械臂，约有 32 次低速高位位置运动，随后进行一次不超过 1 秒的零力保持检验。\n\n'
+                '标定会自主移动真实机械臂，完成 5 个拟合和 2 个独立留出姿态的双向采样，约 29 段 5% 低速位置运动，随后进行一次不超过 1 秒的零力保持检验。\n\n'
                 '继续即确认：\n'
                 '1. 当前夹爪、剪刀、相机、转接件和线缆均已牢固固定，总质量不超过 E05 额定 5 kg；\n'
-                '2. 机械臂全扫掠区、夹点和法兰周围已经清空，未知末端在高位运动时至少有 0.40 m 实物余量；\n'
+                '2. 机械臂全扫掠区和夹点已经清空，当前 STEP 包络外没有未建模障碍物或悬垂线缆；\n'
                 '3. 所有人均在扫掠区外，专人守上游电闸，机械臂没有承载人员或危险物；\n'
-                '4. 当前法兰高度为 {:.3f} m，脚本将始终保持不低于 0.65 m；\n'
-                '5. MoveIt 看不到未建模末端的外形，因此实物余量由现场确认。\n\n'
+                '4. 当前法兰高度为 {:.3f} m；脚本要求法兰不低于 0.45 m、活动连杆不穿 z=0、STEP 包络角点不低于 z=0.30 m；\n'
+                '5. 任一 MoveIt、驱动状态、辨识残差或短时保持门禁失败都会停止并回滚。\n\n'
                 '任一条件不满足请选择“否”。').format(flange_height)
             dialog_title='确认开始未知末端自动标定'
         confirm=wx.MessageDialog(

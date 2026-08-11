@@ -80,6 +80,8 @@ private:
     std::vector<ElfinPDOunit> pdo_input; // txpdo
     std::vector<ElfinPDOunit> pdo_output; //rxpdo
     int slave_no_;
+    bool digital_input_pdo_mapped_;
+    std::size_t digital_input_pdo_offset_;
 
     ros::ServiceServer read_sdo_; //20201116
     ros::ServiceServer read_do_; //20201130
@@ -92,12 +94,11 @@ public:
     ~ElfinEtherCATIOClient();
     int32_t readSDO_unit(int n); // 20201117
     int32_t readDO_unit(int n); // 20201130
-    void writeOutput_unit(int n, int32_t val);
+    bool writeOutput_unit(int n, int32_t val);
     int32_t writeSDO_unit(int n); // 20201117
 
-    int16_t readInput_unit(int n);
-    int32_t readOutput_unit(int n);
-    // bool writeOutput_unit(int n, int32_t val);
+    bool readInput_unit(int n, int16_t& value);
+    bool readOutput_unit(int n, int32_t& value);
 
     std::string getTxSDO();
     std::string getRxSDO();

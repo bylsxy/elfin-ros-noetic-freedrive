@@ -167,7 +167,7 @@ rosrun elfin_robot_bringup start_elfin5_panel.sh --rviz
 rosrun elfin_robot_bringup start_elfin5_hardware.sh --freedrive
 ```
 
-此参数只开放管理器门禁，不会自动 Servo On、进入 CST 或移动。实体 FREE 必须从第一次观测到高电平起保持至少 `0.70 秒`，并取得至少 8 个 10 Hz 高电平样本；允许过滤一次孤立的低电平毛刺，持续低电平会清空本次候选。Panel 请求也必须逐项通过状态新鲜度、静止、Fault、Servo、控制器和六轴模型误差等硬门禁。
+此参数只开放管理器门禁，不会自动 Servo On、进入 CST 或移动。实体 FREE 必须从第一次观测到高电平起保持至少 `0.70 秒`，并取得至少 8 个 10 Hz 高电平样本；允许过滤一次孤立的低电平毛刺，持续低电平会清空本次候选。`read_di` 通信失败或输入 PDO 不完整时，管理器会立即把末端输入标记为不可用、清空未确认候选，并要求重新观察到稳定低电平后才能再次确认 FREE；不会把读取失败当成 `0`。Panel 请求也必须逐项通过状态新鲜度、静止、Fault、Servo、控制器和六轴模型误差等硬门禁。
 
 ## FREE 与 POINT
 

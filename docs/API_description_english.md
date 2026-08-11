@@ -96,7 +96,8 @@ example:
 	```
 
 * **elfin_ros_control/elfin/io_port1/read_di (elfin_robot_msgs/ElfinIODRead)**  
-Read the value from DI  
+Reads the raw DI word from slave 4's cyclic input PDO when mapped, with an SDO fallback for legacy ESI files. Transport failures and short replies fail the service call instead of returning a fabricated zero.
+
 example:  
 	```
 	rosservice call /elfin_ros_control/elfin/io_port1/read_di "data: true"

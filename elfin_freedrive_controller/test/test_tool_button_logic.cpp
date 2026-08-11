@@ -147,6 +147,28 @@ TEST(ToolButtonLogicTest, InputLossExitsConfirmedFreeAndRequiresLowRearm) {
   EXPECT_TRUE(logic.update(bit(ToolButtonLogic::kFreeBit), 3.7).free_pressed);
 }
 
+TEST(ToolButtonLogicTest, InputLossClearsUnconfirmedFreeCandidate) {
+  ToolButtonLogic logic;
+  logic.update(0, 0.0);
+  EXPECT_FALSE(
+      logic.update(bit(ToolButtonLogic::kFreeBit), 1.0).free_pressed);
+
+  const ToolButtonLogic::Events lost = logic.inputUnavailable();
+  EXPECT_FALSE(lost.free_pressed);
+  EXPECT_FALSE(lost.free_released);
+  EXPECT_FALSE(lost.free_short_pulse);
+
+  EXPECT_FALSE(
+      logic.update(bit(ToolButtonLogic::kFreeBit), 1.1).free_pressed);
+  EXPECT_FALSE(logic.update(0, 1.2).free_released);
+  for (unsigned int sample = 0;
+       sample + 1 < ToolButtonLogic::kDefaultFreePressSamples; ++sample) {
+    EXPECT_FALSE(logic.update(bit(ToolButtonLogic::kFreeBit),
+                              2.0 + 0.1 * sample).free_pressed);
+  }
+  EXPECT_TRUE(logic.update(bit(ToolButtonLogic::kFreeBit), 2.7).free_pressed);
+}
+
 TEST(ToolButtonLogicTest, PointUsesRisingEdgeOnly) {
   ToolButtonLogic logic;
   logic.update(0, 0.0);

@@ -30,11 +30,13 @@
 #ifndef ELFIN_ETHERCAT_MANAGER_H
 #define ELFIN_ETHERCAT_MANAGER_H
 
+#include <cstddef>
 #include <stdexcept>
 #include <string>
 
 #include <stdint.h>
 
+#include <boost/atomic.hpp>
 #include <boost/scoped_array.hpp>
 #include <boost/thread.hpp>
 #include <boost/thread/mutex.hpp>
@@ -103,6 +105,25 @@ public:
    * @param[in] channel The byte offset into the input IOMap to read from
    */
   uint8_t readInput(int slave_no, uint8_t channel) const;
+  /**
+   * \brief Copies a contiguous input PDO region without terminating the driver.
+   *
+   * Returns false when the slave, input pointer, or requested byte range is
+   * unavailable.  The destination is zeroed on failure.
+   */
+  bool readInputBytes(int slave_no, std::size_t channel, uint8_t* values,
+                      std::size_t length) const;
+
+  /**
+   * \brief Resolves one TxPDO object to a byte offset from the live CoE map.
+   *
+   * Reads assignment object 0x1c13 and its mapped PDO objects. Returns false
+   * when the map is unavailable, the entry is absent, has the wrong width, or
+   * is not byte-aligned.
+   */
+  bool findInputPdoEntryByteOffset(int slave_no, uint16_t index,
+                                   uint8_t subidx, uint8_t bit_length,
+                                   std::size_t& byte_offset) const;
 
   /**
    * \brief Reads the "channel-th" output-register of the given slave no
@@ -132,6 +153,14 @@ public:
    */
   template <typename T>
   T readSDO(int slave_no, uint16_t index, uint8_t subidx) const;
+  /**
+   * \brief Attempts an SDO read and reports transport/size failures explicitly.
+   *
+   * The output value is always zero-initialized on failure.
+   */
+  template <typename T>
+  bool tryReadSDO(int slave_no, uint16_t index, uint8_t subidx,
+                  T& value) const;
 
   /**
    * \brief get the number of clients
@@ -146,7 +175,8 @@ private:
   int num_clients_;
   boost::thread cycle_thread_;
   mutable boost::mutex iomap_mutex_;
-  bool stop_flag_;
+  mutable boost::mutex mailbox_mutex_;
+  boost::atomic<bool> stop_flag_;
 };
 
 }

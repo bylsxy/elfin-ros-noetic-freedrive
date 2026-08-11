@@ -68,7 +68,14 @@ inline bool gravityEffortHasCapacity(double requested_effort,
   return std::isfinite(requested_effort) && std::isfinite(effort_limit) &&
          effort_limit > 0.0 && std::isfinite(maximum_fraction) &&
          maximum_fraction > 0.0 && maximum_fraction < 1.0 &&
-         std::abs(requested_effort) <= maximum_fraction * effort_limit;
+         std::abs(requested_effort) < maximum_fraction * effort_limit;
+}
+
+inline double gravityCapacityFraction(bool payload_hold_verified,
+                                      double standard_fraction,
+                                      double verified_payload_fraction) {
+  return payload_hold_verified ? verified_payload_fraction
+                               : standard_fraction;
 }
 
 inline bool hardLimitStopRequired(double position, double velocity,
@@ -426,7 +433,11 @@ inline GravityValidation validateGravityObservation(
     model_norm_squared += model[i] * model[i];
     measured_norm_squared += measured[i] * measured[i];
     ++result.excited_joints;
-    if (model[i] * measured[i] <= 0.0) {
+    // Zero feedback is not evidence of opposite torque. Some drives expose a
+    // zero sample at the controller handoff; alignment/residual checks still
+    // account for the missing support, while only a strict sign reversal is
+    // classified as a direction mismatch.
+    if (model[i] * measured[i] < 0.0) {
       ++result.direction_mismatches;
     }
   }

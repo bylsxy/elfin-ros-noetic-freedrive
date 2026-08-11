@@ -25,10 +25,10 @@ class PayloadCalibrationMathTest(unittest.TestCase):
             "confirmed_by_panel": False,
             "execute": False,
             "resume_samples": None,
-            "velocity_scale": 0.03,
-            "acceleration_scale": 0.03,
-            "settle_seconds": 1.0,
-            "sample_seconds": 0.8,
+            "velocity_scale": 0.05,
+            "acceleration_scale": 0.05,
+            "settle_seconds": 0.8,
+            "sample_seconds": 0.6,
             "validation_hold_seconds": 0.8,
         }
         values.update(overrides)
@@ -191,23 +191,47 @@ class PayloadCalibrationMathTest(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             MODULE.validate_static_window("test", positions, velocities, efforts)
 
-    def test_latest_measured_tool_is_eligible_with_validated_limits(self):
+    def test_latest_measured_tool_is_eligible_with_rated_effort_limits(self):
         model = {
-            "mass": 1.2415,
-            "center_radius": 0.4614,
-            "condition": 7.18,
+            "mass": 0.613,
+            "center_radius": 0.615,
+            "condition": 7.7,
             "fit_rmse": 0.97,
             "fit_max": 2.83,
             "validation_rmse": 0.79,
             "validation_max": 1.61,
         }
         capacity = {
-            "worst_ratio": 29.6975 / 36.0,
+            "worst_ratio": 29.6975 / 200.0,
             "allowed_ratio": 0.88,
             "worst_joint": 3,
         }
 
         self.assertEqual(MODULE.PayloadCalibrator.measurement_quality_rejections(model), [])
+        self.assertEqual(
+            MODULE.PayloadCalibrator.control_rejections(model, capacity), []
+        )
+
+    def test_hold_pose_gate_is_separate_from_calibration_path_diagnostic(self):
+        calibrator = object.__new__(MODULE.PayloadCalibrator)
+        calibrator.effort_limits = np.asarray([420.0, 420.0, 200.0, 200.0, 69.0, 69.0])
+        calibrator.maximum_gravity_fraction = 0.90
+        calibrator.calibration_goals = lambda: [("high-load", np.ones(6))]
+
+        def evaluate(values):
+            base = np.zeros(6)
+            base[2] = 190.0 if values[0] > 0.5 else 20.0
+            return base, np.zeros((6, 4))
+
+        calibrator.evaluate_model = evaluate
+        model = {"solution": np.zeros(4), "mass": 1.5}
+
+        capacity = calibrator.evaluate_capacity(
+            model, hold_position=np.zeros(6)
+        )
+
+        self.assertAlmostEqual(capacity["worst_ratio"], 20.0 / 200.0)
+        self.assertAlmostEqual(capacity["path_worst_ratio"], 0.95)
         self.assertEqual(
             MODULE.PayloadCalibrator.control_rejections(model, capacity), []
         )
@@ -273,10 +297,13 @@ class PayloadCalibrationMathTest(unittest.TestCase):
             "validation_max": 2.46,
         }
         capacity = {
-            "worst_ratio": 1.03,
+            "worst_ratio": 0.82,
             "allowed_ratio": 0.88,
             "worst_joint": 3,
-            "worst_effort_nm": 30.9,
+            "worst_effort_nm": 29.5,
+            "path_worst_ratio": 1.03,
+            "path_worst_joint": 3,
+            "path_worst_effort_nm": 37.1,
             "includes_original_start": False,
         }
         with tempfile.TemporaryDirectory() as directory:
@@ -301,11 +328,126 @@ class PayloadCalibrationMathTest(unittest.TestCase):
             self.assertFalse(report["eligible_for_control_hold_test"])
             self.assertEqual(report["status"], "measurement_valid_control_rejected")
             self.assertAlmostEqual(report["mass_kg"], 1.47)
-            self.assertEqual(report["schema_version"], 2)
+            self.assertEqual(report["schema_version"], 3)
+            self.assertAlmostEqual(
+                report["control_assessment"]["hold_pose_capacity_fraction"],
+                0.82,
+            )
+            self.assertAlmostEqual(
+                report["control_assessment"]["path_worst_capacity_fraction"],
+                1.03,
+            )
             self.assertFalse(
                 report["control_assessment"]["center_of_mass_radius_gate_applied"]
             )
 
+
+    def test_reduced_pose_set_covers_actual_workload_and_all_wrist_directions(self):
+        self.assertEqual(len(MODULE.FIT_POSES), 5)
+        self.assertEqual(len(MODULE.VALIDATION_POSES), 2)
+        poses = np.asarray([values for _, values in MODULE.ALL_POSES])
+        self.assertLessEqual(float(np.min(poses[:, 1])), 0.28)
+        self.assertGreaterEqual(float(np.max(poses[:, 1])), 0.75)
+        self.assertLessEqual(float(np.min(poses[:, 2])), -0.76)
+        self.assertLessEqual(float(np.min(poses[:, 3])), -0.45)
+        self.assertGreaterEqual(float(np.max(poses[:, 3])), 0.55)
+        self.assertLessEqual(float(np.min(poses[:, 4])), -0.50)
+        self.assertGreaterEqual(float(np.max(poses[:, 4])), 0.50)
+        self.assertLessEqual(float(np.min(poses[:, 5])), -0.35)
+        self.assertGreaterEqual(float(np.max(poses[:, 5])), 0.50)
+        np.testing.assert_allclose(
+            MODULE.VALIDATION_POSES[-1][1],
+            np.asarray([0.0, 0.75, -0.76, 0.0, -0.15, 0.0]),
+        )
+        np.testing.assert_allclose(
+            MODULE.APPROACH_DELTA,
+            np.asarray([0.0, 0.03, -0.03, 0.04, -0.04, 0.04]),
+        )
+
+    def test_step_envelope_loader_includes_configured_padding(self):
+        document = {
+            "collision_model": {
+                "enabled": True,
+                "attach_link": "elfin_end_link",
+                "cad_bounds_mm": {
+                    "min": [-100.0, -200.0, -300.0],
+                    "max": [100.0, 200.0, 300.0],
+                },
+                "cad_to_attach": {
+                    "translation_m": [0.01, 0.02, 0.03],
+                    "quaternion_xyzw": [0.0, 0.0, 0.0, 1.0],
+                },
+                "conservative_envelope": {
+                    "enabled": True,
+                    "padding_m": 0.005,
+                    "boxes": [{"object_id": "box_a"}],
+                },
+            },
+            "validation": {
+                "geometry_matches_step": True,
+                "execution_ready": True,
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "tool.yaml")
+            with open(path, "w") as output:
+                yaml.safe_dump(document, output)
+            resolved, object_ids, attach_link, corners = (
+                MODULE.load_tool_floor_corners(path)
+            )
+        self.assertEqual(resolved, os.path.realpath(path))
+        self.assertEqual(object_ids, ("box_a",))
+        self.assertEqual(attach_link, "elfin_end_link")
+        self.assertEqual(len(corners), 8)
+        values = np.asarray(corners)
+        np.testing.assert_allclose(
+            np.min(values, axis=0), [-0.095, -0.185, -0.275]
+        )
+        np.testing.assert_allclose(
+            np.max(values, axis=0), [0.115, 0.225, 0.335]
+        )
+
+    def test_height_gate_rejects_floor_flange_and_tool_violations(self):
+        safe = {
+            "lowest_link": "elfin_link1",
+            "lowest_link_height": 0.22,
+            "flange": 0.51,
+            "tool_height": 0.41,
+        }
+        MODULE.require_safe_height_report(
+            safe, "safe", MODULE.MINIMUM_FLANGE_HEIGHT
+        )
+        for key, value, message in (
+            ("lowest_link_height", -0.001, "z=0"),
+            ("flange", 0.449, "法兰高度"),
+            ("tool_height", 0.299, "STEP 包络"),
+        ):
+            unsafe = dict(safe)
+            unsafe[key] = value
+            with self.assertRaisesRegex(RuntimeError, message):
+                MODULE.require_safe_height_report(
+                    unsafe, "unsafe", MODULE.MINIMUM_FLANGE_HEIGHT
+                )
+
+    def test_attached_tool_gate_requires_every_step_proxy_on_attach_link(self):
+        calibrator = object.__new__(MODULE.PayloadCalibrator)
+        calibrator.tool_object_ids = ("box_a", "box_b")
+        calibrator.tool_attach_link = "elfin_end_link"
+        calibrator.scene = SimpleNamespace(
+            get_attached_objects=lambda requested: {
+                name: SimpleNamespace(link_name="elfin_end_link")
+                for name in requested
+            }
+        )
+        calibrator.verify_tool_collision_model_attached()
+        calibrator.scene = SimpleNamespace(
+            get_attached_objects=lambda _requested: {
+                "box_a": SimpleNamespace(link_name="elfin_end_link")
+            }
+        )
+        self.assertEqual(len(calibrator.attached_tool_objects), 2)
+        with self.assertRaisesRegex(RuntimeError, "box_b"):
+            calibrator.verify_tool_collision_model_attached()
 
 if __name__ == "__main__":
     unittest.main()

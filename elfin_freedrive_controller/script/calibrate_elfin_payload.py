@@ -3,6 +3,8 @@
 
 import argparse
 import csv
+import copy
+import itertools
 import datetime
 import math
 import os
@@ -41,21 +43,28 @@ from std_srvs.srv import SetBool, SetBoolRequest
 JOINT_NAMES = ["elfin_joint{}".format(index) for index in range(1, 7)]
 END_LINK = "elfin_end_link"
 BASE_LINK = "elfin_base"
-APPROACH_DELTA = np.asarray([0.0, 0.04, -0.04, 0.06, -0.06, 0.06])
-MINIMUM_FLANGE_HEIGHT = 0.65
+MOVING_LINKS = tuple(
+    ["elfin_link{}".format(index) for index in range(1, 7)] + [END_LINK]
+)
+APPROACH_DELTA = np.asarray([0.0, 0.03, -0.03, 0.04, -0.04, 0.04])
+MODELED_FLOOR_HEIGHT = 0.0
+MINIMUM_FLANGE_HEIGHT = 0.45
+MINIMUM_TOOL_HEIGHT = 0.30
+DEFAULT_TOOL_ENVELOPE_YAML = os.path.expanduser(
+    "~/ros_ws/src/elfin_vision/config/harvester_tool.yaml"
+)
 MAXIMUM_PAYLOAD_MASS = 5.0
 NOMINAL_PAYLOAD_CENTER_OF_MASS_RADIUS = 0.60
 FIT_POSES = (
-    ("拟合 A", [0.0, 0.28, -0.36, 0.0, 0.0, 0.0]),
-    ("拟合 B", [0.0, 0.40, -0.50, 0.0, 0.35, 0.0]),
-    ("拟合 C", [0.0, 0.40, -0.50, 0.0, -0.35, 0.0]),
-    ("拟合 D", [0.0, 0.52, -0.62, 0.35, 0.30, -0.25]),
-    ("拟合 E", [0.0, 0.52, -0.62, -0.35, -0.30, 0.25]),
-    ("拟合 F", [0.0, 0.32, -0.44, 0.50, 0.42, -0.45]),
+    ("拟合 A 低负载中性腕", [0.0, 0.28, -0.36, 0.0, 0.0, 0.0]),
+    ("拟合 B 中负载正俯仰", [0.0, 0.46, -0.56, 0.0, 0.50, 0.0]),
+    ("拟合 C 高负载正腕姿", [0.0, 0.72, -0.76, 0.45, 0.30, -0.35]),
+    ("拟合 D 高负载负腕姿", [0.0, 0.72, -0.76, -0.45, -0.30, 0.35]),
+    ("拟合 E 中负载负俯仰", [0.0, 0.46, -0.56, 0.0, -0.50, 0.0]),
 )
 VALIDATION_POSES = (
-    ("留出 G", [0.0, 0.32, -0.44, -0.50, -0.42, 0.45]),
-    ("留出 H", [0.0, 0.46, -0.56, 0.25, -0.18, 0.30]),
+    ("留出 F 交叉腕姿", [0.0, 0.58, -0.66, 0.55, -0.40, 0.50]),
+    ("留出 G 实际工作姿态", [0.0, 0.75, -0.76, 0.0, -0.15, 0.0]),
 )
 ALL_POSES = FIT_POSES + VALIDATION_POSES
 CANCEL_REQUESTED = threading.Event()
@@ -90,6 +99,104 @@ def strict_preflight_outcome(publication_count, message):
     if message.startswith("未通过"):
         return False
     return None
+
+def quaternion_rotation_matrix(quaternion):
+    x_value, y_value, z_value, w_value = [
+        float(value) for value in quaternion
+    ]
+    return np.asarray(
+        [
+            [
+                1.0 - 2.0 * (y_value * y_value + z_value * z_value),
+                2.0 * (x_value * y_value - z_value * w_value),
+                2.0 * (x_value * z_value + y_value * w_value),
+            ],
+            [
+                2.0 * (x_value * y_value + z_value * w_value),
+                1.0 - 2.0 * (x_value * x_value + z_value * z_value),
+                2.0 * (y_value * z_value - x_value * w_value),
+            ],
+            [
+                2.0 * (x_value * z_value - y_value * w_value),
+                2.0 * (y_value * z_value + x_value * w_value),
+                1.0 - 2.0 * (x_value * x_value + y_value * y_value),
+            ],
+        ],
+        dtype=float,
+    )
+
+
+def load_tool_floor_corners(path):
+    resolved_path = os.path.realpath(os.path.expanduser(path))
+    if not os.path.isfile(resolved_path):
+        raise RuntimeError("当前末端包络配置不存在：" + resolved_path)
+    with open(resolved_path) as stream:
+        document = yaml.safe_load(stream) or {}
+    collision = document.get("collision_model", {})
+    validation = document.get("validation", {})
+    envelope = collision.get("conservative_envelope", {})
+    if not collision.get("enabled", False):
+        raise RuntimeError("当前末端碰撞模型未启用：" + resolved_path)
+    if not envelope.get("enabled", False):
+        raise RuntimeError("当前末端保守包络未启用：" + resolved_path)
+    if not validation.get("geometry_matches_step", False):
+        raise RuntimeError("当前末端包络尚未通过 STEP 几何核验：" + resolved_path)
+    if not validation.get("execution_ready", False):
+        raise RuntimeError("当前末端包络尚未获准执行：" + resolved_path)
+    bounds = collision.get("cad_bounds_mm", {})
+    minimum = np.asarray(bounds.get("min", ()), dtype=float)
+    maximum = np.asarray(bounds.get("max", ()), dtype=float)
+    transform = collision.get("cad_to_attach", {})
+    translation = np.asarray(transform.get("translation_m", ()), dtype=float)
+    quaternion = np.asarray(transform.get("quaternion_xyzw", ()), dtype=float)
+    if minimum.shape != (3,) or maximum.shape != (3,):
+        raise RuntimeError("当前末端 cad_bounds_mm 必须包含三维 min/max")
+    if translation.shape != (3,) or quaternion.shape != (4,):
+        raise RuntimeError("当前末端 cad_to_attach 变换维度无效")
+    if np.any(maximum <= minimum):
+        raise RuntimeError("当前末端 cad_bounds_mm 范围无效")
+    boxes = tuple(envelope.get("boxes", ()))
+    object_ids = tuple(str(box.get("object_id", "")).strip() for box in boxes)
+    attach_link = str(collision.get("attach_link", "")).strip()
+    if not object_ids or any(not object_id for object_id in object_ids):
+        raise RuntimeError("当前末端包络没有完整的 STEP 派生 object_id")
+    if len(set(object_ids)) != len(object_ids):
+        raise RuntimeError("当前末端包络 object_id 存在重复")
+    if not attach_link:
+        raise RuntimeError("当前末端包络没有 attach_link")
+    quaternion_norm = float(np.linalg.norm(quaternion))
+    if abs(quaternion_norm - 1.0) > 1e-3:
+        raise RuntimeError("当前末端 cad_to_attach 四元数未归一化")
+    padding = float(envelope.get("padding_m", 0.0))
+    minimum = minimum / 1000.0 - padding
+    maximum = maximum / 1000.0 + padding
+    rotation = quaternion_rotation_matrix(quaternion / quaternion_norm)
+    corners = []
+    for corner in itertools.product(*zip(minimum, maximum)):
+        corners.append(rotation.dot(np.asarray(corner)) + translation)
+    return resolved_path, object_ids, attach_link, tuple(corners)
+
+def require_safe_height_report(heights, label, minimum_flange_height):
+    if heights["lowest_link_height"] < MODELED_FLOOR_HEIGHT - 1e-9:
+        raise RuntimeError(
+            "{} 的 {} 高度 {:.3f} m 低于 z=0 全臂硬平面".format(
+                label,
+                heights["lowest_link"],
+                heights["lowest_link_height"],
+            )
+        )
+    if heights["flange"] < minimum_flange_height - 1e-9:
+        raise RuntimeError(
+            "{} 法兰高度 {:.3f} m，低于标定门限 {:.3f} m".format(
+                label, heights["flange"], minimum_flange_height
+            )
+        )
+    if heights["tool_height"] < MINIMUM_TOOL_HEIGHT - 1e-9:
+        raise RuntimeError(
+            "{} 的当前 STEP 包络最低角点 {:.3f} m，低于标定专用净空 {:.3f} m".format(
+                label, heights["tool_height"], MINIMUM_TOOL_HEIGHT
+            )
+        )
 
 
 def parse_args():
@@ -126,10 +233,15 @@ def parse_args():
         action="store_true",
         help="confirmation token supplied after the Panel safety dialog",
     )
-    parser.add_argument("--velocity-scale", type=float, default=0.03)
-    parser.add_argument("--acceleration-scale", type=float, default=0.03)
-    parser.add_argument("--settle-seconds", type=float, default=1.0)
-    parser.add_argument("--sample-seconds", type=float, default=0.8)
+    parser.add_argument("--velocity-scale", type=float, default=0.05)
+    parser.add_argument("--acceleration-scale", type=float, default=0.05)
+    parser.add_argument("--settle-seconds", type=float, default=0.8)
+    parser.add_argument("--sample-seconds", type=float, default=0.6)
+    parser.add_argument(
+        "--tool-envelope-yaml",
+        default=DEFAULT_TOOL_ENVELOPE_YAML,
+        help="current STEP-derived tool envelope used for the z-floor hard gate",
+    )
     parser.add_argument("--validation-hold-seconds", type=float, default=0.8)
     parser.add_argument(
         "--manager-namespace",
@@ -337,9 +449,16 @@ class PayloadCalibrator:
         self.group = None
         self.validity = None
         self.fk = None
+        self.scene = None
+        self.tool_envelope_path = None
+        self.tool_object_ids = ()
+        self.tool_attach_link = None
+        self.tool_floor_corners = ()
+        self.attached_tool_objects = ()
         if not self.analysis_only:
             self.monitor = RobotMonitor()
             self.group = moveit_commander.MoveGroupCommander("elfin_arm")
+            self.scene = moveit_commander.PlanningSceneInterface(synchronous=True)
             self.group.set_planning_time(8.0)
             self.group.set_num_planning_attempts(8)
             self.group.allow_replanning(False)
@@ -350,6 +469,12 @@ class PayloadCalibrator:
                 "/check_state_validity", GetStateValidity
             )
             self.fk = rospy.ServiceProxy("/compute_fk", GetPositionFK)
+            (
+                self.tool_envelope_path,
+                self.tool_object_ids,
+                self.tool_attach_link,
+                self.tool_floor_corners,
+            ) = load_tool_floor_corners(args.tool_envelope_yaml)
         self.evaluate = rospy.ServiceProxy(
             self.manager_namespace + "/evaluate_payload_model", EvaluatePayloadModel
         )
@@ -392,26 +517,92 @@ class PayloadCalibrator:
             raise_if_cancelled()
             rospy.wait_for_service(name, timeout=5.0)
 
+    def verify_tool_collision_model_attached(self):
+        if self.scene is None:
+            raise RuntimeError("MoveIt 规划场景不可用，无法确认当前末端包络")
+        attached = self.scene.get_attached_objects(list(self.tool_object_ids))
+        missing = [
+            object_id
+            for object_id in self.tool_object_ids
+            if object_id not in attached
+        ]
+        if missing:
+            raise RuntimeError(
+                "负载标定前未附着 STEP 派生末端碰撞对象：" + ", ".join(missing)
+            )
+        wrong_links = [
+            "{}->{}".format(object_id, attached[object_id].link_name)
+            for object_id in self.tool_object_ids
+            if attached[object_id].link_name != self.tool_attach_link
+        ]
+        if wrong_links:
+            raise RuntimeError(
+                "STEP 派生末端碰撞对象附着连杆错误：" + ", ".join(wrong_links)
+            )
+        self.attached_tool_objects = tuple(
+            copy.deepcopy(attached[object_id]) for object_id in self.tool_object_ids
+        )
+
+    def robot_state(self, values):
+        state = copy.deepcopy(self.group.get_current_state())
+        positions = dict(zip(state.joint_state.name, state.joint_state.position))
+        if not self.attached_tool_objects:
+            raise RuntimeError("当前 STEP 派生末端碰撞对象尚未注入机器人状态")
+        state.attached_collision_objects = [
+            copy.deepcopy(item) for item in self.attached_tool_objects
+        ]
+        missing = [name for name in JOINT_NAMES if name not in positions]
+        if missing:
+            raise RuntimeError("当前 MoveIt 状态缺少关节：" + ", ".join(missing))
+        positions.update(dict(zip(JOINT_NAMES, values)))
+        state.joint_state.position = [
+            positions[name] for name in state.joint_state.name
+        ]
+        state.joint_state.header.stamp = rospy.Time.now()
+        return state
+
     def state_request(self, values):
         request = GetStateValidityRequest()
         request.group_name = "elfin_arm"
-        request.robot_state = RobotState()
-        request.robot_state.joint_state = JointState(
-            name=list(JOINT_NAMES), position=list(values)
-        )
+        request.robot_state = self.robot_state(values)
         return request
 
-    def flange_height(self, values):
+    def state_height_report(self, values):
         request = GetPositionFKRequest()
         request.header.frame_id = BASE_LINK
-        request.fk_link_names = [END_LINK]
-        request.robot_state.joint_state = JointState(
-            name=list(JOINT_NAMES), position=list(values)
-        )
+        request.fk_link_names = list(MOVING_LINKS)
+        request.robot_state = self.robot_state(values)
         result = self.fk(request)
-        if result.error_code.val != result.error_code.SUCCESS or not result.pose_stamped:
-            raise RuntimeError("MoveIt 无法计算 {} 的法兰高度".format(values))
-        return float(result.pose_stamped[0].pose.position.z)
+        if result.error_code.val != result.error_code.SUCCESS:
+            raise RuntimeError("MoveIt 无法计算 {} 的全臂高度".format(values))
+        poses = dict(zip(result.fk_link_names, result.pose_stamped))
+        missing = [name for name in MOVING_LINKS if name not in poses]
+        if missing:
+            raise RuntimeError("MoveIt 全臂 FK 缺少：" + ", ".join(missing))
+        link_heights = {
+            name: float(poses[name].pose.position.z) for name in MOVING_LINKS
+        }
+        lowest_link, lowest_link_height = min(
+            link_heights.items(), key=lambda item: item[1]
+        )
+        end_pose = poses[END_LINK].pose
+        orientation = end_pose.orientation
+        world_rotation = quaternion_rotation_matrix(
+            (orientation.x, orientation.y, orientation.z, orientation.w)
+        )
+        tool_height = min(
+            float(end_pose.position.z) + world_rotation.dot(corner)[2]
+            for corner in self.tool_floor_corners
+        )
+        return {
+            "flange": float(end_pose.position.z),
+            "lowest_link": lowest_link,
+            "lowest_link_height": float(lowest_link_height),
+            "tool_height": float(tool_height),
+        }
+
+    def flange_height(self, values):
+        return self.state_height_report(values)["flange"]
 
     def validate_state(
         self, values, label, minimum_height=MINIMUM_FLANGE_HEIGHT
@@ -429,14 +620,9 @@ class PayloadCalibrator:
                     label, ", ".join(contacts) or "无效机器人状态"
                 )
             )
-        height = self.flange_height(values)
-        if height < minimum_height:
-            raise RuntimeError(
-                "{} 法兰高度 {:.3f} m，低于上半工作区门限 {:.3f} m".format(
-                    label, height, minimum_height
-                )
-            )
-        return height
+        heights = self.state_height_report(values)
+        require_safe_height_report(heights, label, minimum_height)
+        return heights["flange"]
 
     def validate_segment(self, start, goal, label):
         maximum_delta = float(np.max(np.abs(np.asarray(goal) - np.asarray(start))))
@@ -823,7 +1009,7 @@ class PayloadCalibrator:
             )
         if capacity["worst_ratio"] > capacity["allowed_ratio"]:
             reasons.append(
-                "候选模型在已检查路径的 J{} 需要 {:.1f}% 力矩容量，"
+                "候选模型在短时保持验证姿态的 J{} 需要 {:.1f}% 力矩容量，"
                 "自动标定只允许 {:.1f}%".format(
                     capacity["worst_joint"],
                     100 * capacity["worst_ratio"],
@@ -832,23 +1018,26 @@ class PayloadCalibrator:
             )
         return reasons
 
-    def evaluate_capacity(self, model, start=None):
+    def capacity_at_positions(self, model, poses, interpolate):
         solution = model["solution"]
-        poses = [np.asarray(goal, dtype=float) for _, goal in self.calibration_goals()]
-        includes_start = start is not None
-        if includes_start:
-            poses.insert(0, np.asarray(start, dtype=float))
-            poses.append(np.asarray(start, dtype=float))
+        poses = [np.asarray(pose, dtype=float) for pose in poses]
+        if not poses:
+            raise RuntimeError("力矩容量评估至少需要一个姿态")
         worst_ratio = 0.0
         worst_joint = 0
         worst_effort = 0.0
         previous = poses[0]
         for goal in poses:
-            maximum_delta = float(np.max(np.abs(np.asarray(goal) - previous)))
-            steps = max(2, int(math.ceil(maximum_delta / 0.04)))
-            for step in range(steps + 1):
-                progress = float(step) / float(steps)
-                values = previous + progress * (np.asarray(goal) - previous)
+            if interpolate:
+                maximum_delta = float(np.max(np.abs(goal - previous)))
+                steps = max(2, int(math.ceil(maximum_delta / 0.04)))
+                samples = (
+                    previous + float(step) / float(steps) * (goal - previous)
+                    for step in range(steps + 1)
+                )
+            else:
+                samples = (goal,)
+            for values in samples:
                 base, regressor = self.evaluate_model(values)
                 requested = base + regressor.dot(solution)
                 ratios = np.abs(requested) / self.effort_limits
@@ -856,13 +1045,36 @@ class PayloadCalibrator:
                     worst_ratio = float(np.max(ratios))
                     worst_joint = int(np.argmax(ratios))
                     worst_effort = float(requested[worst_joint])
-            previous = np.asarray(goal)
-        allowed = self.maximum_gravity_fraction - 0.02
+            previous = goal
         return {
             "worst_ratio": worst_ratio,
             "worst_joint": worst_joint + 1,
             "worst_effort_nm": worst_effort,
+        }
+
+    def evaluate_capacity(self, model, start=None, hold_position=None):
+        path_poses = [
+            np.asarray(goal, dtype=float) for _, goal in self.calibration_goals()
+        ]
+        includes_start = start is not None
+        if includes_start:
+            path_poses.insert(0, np.asarray(start, dtype=float))
+            path_poses.append(np.asarray(start, dtype=float))
+        if hold_position is None:
+            hold_position = path_poses[-1]
+        hold = self.capacity_at_positions(
+            model, [np.asarray(hold_position, dtype=float)], interpolate=False
+        )
+        path = self.capacity_at_positions(model, path_poses, interpolate=True)
+        allowed = self.maximum_gravity_fraction - 0.02
+        return {
+            "worst_ratio": hold["worst_ratio"],
+            "worst_joint": hold["worst_joint"],
+            "worst_effort_nm": hold["worst_effort_nm"],
             "allowed_ratio": allowed,
+            "path_worst_ratio": path["worst_ratio"],
+            "path_worst_joint": path["worst_joint"],
+            "path_worst_effort_nm": path["worst_effort_nm"],
             "includes_original_start": includes_start,
         }
 
@@ -944,7 +1156,7 @@ class PayloadCalibrator:
         else:
             status = "measurement_valid_control_candidate"
         report = {
-            "schema_version": 2,
+            "schema_version": 3,
             "status": status,
             "measurement_valid": measurement_valid,
             "eligible_for_control_hold_test": control_eligible,
@@ -976,12 +1188,24 @@ class PayloadCalibrator:
                     model["center_radius"]
                     > NOMINAL_PAYLOAD_CENTER_OF_MASS_RADIUS
                 ),
+                "hold_pose_worst_joint": int(capacity["worst_joint"]),
+                "hold_pose_worst_effort_nm": float(
+                    capacity["worst_effort_nm"]
+                ),
+                "hold_pose_capacity_fraction": float(capacity["worst_ratio"]),
+                "hold_pose_allowed_capacity_fraction": float(
+                    capacity["allowed_ratio"]
+                ),
                 "path_includes_original_start": bool(
                     capacity["includes_original_start"]
                 ),
-                "path_worst_joint": int(capacity["worst_joint"]),
-                "path_worst_effort_nm": float(capacity["worst_effort_nm"]),
-                "path_worst_capacity_fraction": float(capacity["worst_ratio"]),
+                "path_worst_joint": int(capacity["path_worst_joint"]),
+                "path_worst_effort_nm": float(
+                    capacity["path_worst_effort_nm"]
+                ),
+                "path_worst_capacity_fraction": float(
+                    capacity["path_worst_ratio"]
+                ),
                 "path_allowed_capacity_fraction": float(
                     capacity["allowed_ratio"]
                 ),
@@ -1248,7 +1472,9 @@ class PayloadCalibrator:
             )
         raise primary_error
 
-    def identify_and_report(self, pairs, raw_path, profile_name, start=None):
+    def identify_and_report(
+        self, pairs, raw_path, profile_name, start=None, hold_position=None
+    ):
         if len(pairs) != len(ALL_POSES):
             raise RuntimeError(
                 "负载辨识需要完整的 {} 组双向样本，当前只有 {} 组".format(
@@ -1258,7 +1484,11 @@ class PayloadCalibrator:
         fit_pairs = pairs[: len(FIT_POSES)]
         validation_pairs = pairs[len(FIT_POSES) :]
         model = self.fit_payload(fit_pairs, validation_pairs)
-        capacity = self.evaluate_capacity(model, start=start)
+        if hold_position is None:
+            hold_position = pairs[-1]["second"]["position"]
+        capacity = self.evaluate_capacity(
+            model, start=start, hold_position=hold_position
+        )
         quality_rejections = self.measurement_quality_rejections(model)
         control_rejections = self.control_rejections(model, capacity)
         sensitivity = self.leave_one_pose_out_sensitivity(
@@ -1276,7 +1506,8 @@ class PayloadCalibrator:
         log(
             "[测量] 质量 {:.3f} kg（重量 {:.2f} N），重心 "
             "[{:.3f}, {:.3f}, {:.3f}] m，半径 {:.3f} m；"
-            "拟合/留出 RMSE {:.2f}/{:.2f} Nm，路径容量峰值 {:.1f}%".format(
+            "拟合/留出 RMSE {:.2f}/{:.2f} Nm，保持姿态容量 {:.1f}%，"
+            "标定路径诊断峰值 {:.1f}%".format(
                 model["mass"],
                 model["mass"] * 9.81,
                 model["center"][0],
@@ -1286,6 +1517,7 @@ class PayloadCalibrator:
                 model["fit_rmse"],
                 model["validation_rmse"],
                 100 * capacity["worst_ratio"],
+                100 * capacity["path_worst_ratio"],
             )
         )
         if model["center_radius"] > NOMINAL_PAYLOAD_CENTER_OF_MASS_RADIUS:
@@ -1306,7 +1538,15 @@ class PayloadCalibrator:
             report_path,
         )
 
-    def assess_and_activate(self, pairs, raw_path, profile_name, start, return_to_start):
+    def assess_and_activate(
+        self,
+        pairs,
+        raw_path,
+        profile_name,
+        start,
+        return_to_start,
+        hold_position=None,
+    ):
         (
             model,
             capacity,
@@ -1314,7 +1554,11 @@ class PayloadCalibrator:
             control_rejections,
             report_path,
         ) = self.identify_and_report(
-            pairs, raw_path, profile_name, start=start
+            pairs,
+            raw_path,
+            profile_name,
+            start=start,
+            hold_position=hold_position,
         )
         if quality_rejections:
             raise RuntimeError(
@@ -1334,7 +1578,8 @@ class PayloadCalibrator:
         )
         log(
             "[辨识] 质量 {:.3f} kg，重心 [{:.3f}, {:.3f}, {:.3f}] m；"
-            "拟合/留出 RMSE {:.2f}/{:.2f} Nm，路径容量峰值 {:.1f}%".format(
+            "拟合/留出 RMSE {:.2f}/{:.2f} Nm，保持姿态容量 {:.1f}%，"
+            "标定路径诊断峰值 {:.1f}%".format(
                 model["mass"],
                 model["center"][0],
                 model["center"][1],
@@ -1342,6 +1587,7 @@ class PayloadCalibrator:
                 model["fit_rmse"],
                 model["validation_rmse"],
                 100 * capacity["worst_ratio"],
+                100 * capacity["path_worst_ratio"],
             )
         )
         log("[记录] 原始样本：" + raw_path)
@@ -1379,17 +1625,17 @@ class PayloadCalibrator:
             raise RuntimeError("复用样本的真机保持验证只能从 Panel 清场确认后启动")
         if current_height < MINIMUM_FLANGE_HEIGHT:
             target = np.asarray(VALIDATION_POSES[-1][1], dtype=float)
-            target_height = self.validate_state(target, "短保持高位 H")
+            target_height = self.validate_state(target, "短保持实际工作姿态")
             recovery_floor = max(0.05, current_height - 0.015)
             log(
-                "[复用] 当前法兰 {:.3f} m；先以 3% 规划抬升到高位 H "
+                "[复用] 当前法兰 {:.3f} m；先以 5% 规划抬升到实际工作姿态 "
                 "{:.3f} m，轨迹不得低于 {:.3f} m".format(
                     current_height, target_height, recovery_floor
                 )
             )
             self.move_to(
                 target,
-                "复用样本前抬升到高位 H",
+                "复用样本前抬升到实际工作姿态",
                 minimum_height=recovery_floor,
             )
             start, _, _ = self.monitor.snapshot()
@@ -1407,7 +1653,12 @@ class PayloadCalibrator:
         log("[复用] 不重走标定轨迹，仅检查当前姿态并进行最多 1 秒保持验证")
         try:
             return self.assess_and_activate(
-                pairs, raw_path, profile_name, start, return_to_start=False
+                pairs,
+                raw_path,
+                profile_name,
+                start,
+                return_to_start=False,
+                hold_position=start,
             )
         except Exception as error:
             self.recover_after_failure(error)
@@ -1439,28 +1690,36 @@ class PayloadCalibrator:
         self.wait_for_services()
         if self.analysis_only:
             return self.analyze_saved_samples()
+        self.verify_tool_collision_model_attached()
         self.monitor.wait_for_initial_driver_state()
         start, velocity, _ = self.monitor.snapshot()
         if float(np.max(np.abs(velocity))) > 0.004:
             raise RuntimeError("开始标定前机械臂必须静止")
         self.evaluate_model(start)
         validation_start = start
-        current_height = self.flange_height(start)
+        start_heights = self.state_height_report(start)
+        current_height = start_heights["flange"]
         if self.args.resume_samples:
             return self.resume_saved_samples(start, current_height)
-        if not self.args.execute and current_height < MINIMUM_FLANGE_HEIGHT:
+        try:
+            require_safe_height_report(
+                start_heights, "当前起点", MINIMUM_FLANGE_HEIGHT
+            )
+        except RuntimeError as error:
+            if self.args.execute:
+                raise
             validation_start = np.asarray(FIT_POSES[0][1], dtype=float)
             log(
-                "[只读检查] 当前法兰仅 {:.3f} m；真机执行会拒绝。"
-                "本次仅以虚拟高位起点验证预设路径，不移动机械臂。".format(
-                    current_height
+                "[只读检查] 当前起点不满足真机标定门禁：{}；"
+                "本次仅以虚拟安全起点验证预设路径，不移动机械臂。".format(
+                    error
                 )
             )
         minimum_height = self.validate_complete_sequence(validation_start)
         log(
             "[只读检查] 全部双向标定路径通过 MoveIt；法兰最低 {:.3f} m，"
-            "始终高于 {:.3f} m 上半工作区门限".format(
-                minimum_height, MINIMUM_FLANGE_HEIGHT
+            "活动连杆始终不穿 z=0，当前 STEP 包络角点始终高于 {:.3f} m".format(
+                minimum_height, MINIMUM_TOOL_HEIGHT
             )
         )
         if not self.args.execute:
