@@ -20,6 +20,7 @@ find_package(catkin REQUIRED COMPONENTS
 )
 
 find_package(orocos_kdl REQUIRED)
+find_package(yaml-cpp REQUIRED)
 
 add_message_files(
   FILES
@@ -28,7 +29,12 @@ add_message_files(
 
 add_service_files(
   FILES
+  DeleteRecordedPoint.srv
+  EvaluatePayloadModel.srv
+  GetPayloadModel.srv
+  ListRecordedPoints.srv
   SetDampingScales.srv
+  SetPayloadModel.srv
 )
 
 generate_messages(
@@ -64,6 +70,7 @@ target_link_libraries(${PROJECT_NAME}
 
 target_link_libraries(elfin_freedrive_manager
   ${catkin_LIBRARIES}
+  yaml-cpp
 )
 
 add_dependencies(${PROJECT_NAME} ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
@@ -89,11 +96,13 @@ install(DIRECTORY config launch test
 )
 
 catkin_install_python(PROGRAMS
+  script/calibrate_elfin_payload.py
   script/collect_elfin_gravity_calibration.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
 if(CATKIN_ENABLE_TESTING)
+  catkin_add_nosetests(test/test_payload_calibration.py)
   catkin_add_gtest(${PROJECT_NAME}_math_test test/test_freedrive_math.cpp)
   if(TARGET ${PROJECT_NAME}_math_test)
     target_include_directories(${PROJECT_NAME}_math_test PRIVATE include)

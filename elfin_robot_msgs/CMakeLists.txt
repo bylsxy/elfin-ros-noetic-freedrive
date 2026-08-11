@@ -58,6 +58,7 @@ add_service_files(
   SetFloat64.srv
   ElfinIODRead.srv
   ElfinIODWrite.srv
+  CockpitJog.srv
 )
 
 ## Generate actions in the 'action' folder

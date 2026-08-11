@@ -1,5 +1,7 @@
 # E05 空载零力拖拽标定与真机静态验收（2026-07-24）
 
+> **历史记录，不是当前操作步骤：** 2026-07-26 安装新末端后发生了非预期 FREE 下坠；活动事故锁已于 2026-07-27 按用户指令解除，但当前新末端仍未取得可用于 FREE 的负载模型。本文只证明旧空载、旧版本结果，当前状态见 [事故记录](e05_freedrive_incident_2026-07-26.md)。
+
 ## 结论
 
 本机 E05 在**空载、无末端工具**条件下已经完成多姿态重力标定，以及 Home 和中等承重姿态的受监督真机静态 CST 验收。旧版完整 3 秒力矩交接后，机械臂没有自行下坠、抬升、抖动、Fault 或 Servo Off。后续版本已把接管改为 0.5 秒；曾启用的有限入口自适应因会误学人手预载，已在 2026-07-25 默认关闭，必须用固定多姿态模型重新真机复验。
@@ -34,8 +36,8 @@ measured_effort = gravity_scale * KDL_gravity + gravity_bias
 原始数据和候选报告保存在：
 
 ```text
-/home/jetson/.ros/elfin_freedrive_gravity_samples.csv
-/home/jetson/.ros/elfin_freedrive_gravity_candidate.yaml
+/home/catas/.ros/elfin_freedrive_gravity_samples.csv
+/home/catas/.ros/elfin_freedrive_gravity_candidate.yaml
 ```
 
 不要删除或覆盖这两个文件。当前启用参数位于 `elfin_freedrive_controller/config/elfin_freedrive_controller.yaml`。
@@ -43,7 +45,7 @@ measured_effort = gravity_scale * KDL_gravity + gravity_bias
 ## 当前力矩保护
 
 - `effort_limit_scale=0.20` 先把输出限制在 URDF 额定值的 20%。
-- 再用显式每轴上限 `[15, 84, 30, 15, 8, 8] Nm` 收紧。J2 在 2026-07-25 空载高重力姿态的位置保持反馈约为 `-67.3 Nm`；原 `65 Nm` 额外上限会在模型方向和残差均正常时造成容量误退出，因此恢复为 URDF `420 Nm` 额定值的 20%，即 `84 Nm`。
+- 当前再用显式每轴上限 `[15, 84, 36, 15, 10, 8] Nm` 收紧。J2 在 2026-07-25 空载高重力姿态的位置保持反馈约为 `-67.3 Nm`；原 `65 Nm` 额外上限会在模型方向和残差均正常时造成容量误退出，因此恢复为 URDF `420 Nm` 额定值的 20%，即 `84 Nm`。J3/J5 后续为已测新末端有限调整到 `36/10 Nm`，仍只有各自 URDF 额定值的 `18%/14.5%`。
 - 模型重力若达到任一轴显式上限的 90%，控制器拒绝进入或保护退出，不允许静默饱和后继续下坠。
 - 管理器现在会在切换到 CST 前按入口微调后的模型提前计算容量，并把限制轴的“需求/可用 Nm”显示在重力预检中；控制器另有独立 `GRAVITY_CAPACITY` 状态，不再冒充模型反向或超速。
 - J2/J3 已验证中负载模型力矩约为 `-31.46 / +14.23 Nm`，在上限内有明确余量。
@@ -61,7 +63,7 @@ measured_effort = gravity_scale * KDL_gravity + gravity_bias
 4 秒试验 CSV：
 
 ```text
-/home/jetson/.ros/elfin_freedrive_trials/trial_1784883185_55110872.csv
+/home/catas/.ros/elfin_freedrive_trials/trial_1784883185_55110872.csv
 ```
 
 管理器还修复了一个切换时序问题：严格 `switch_controller` 在单线程回调中执行时，订阅消息会短暂排队。切换前已确认状态新鲜后，管理器现在从切换完成时重新计算正常超时窗口；若设备真的不再更新，窗口到期后仍会保护回退。
@@ -75,10 +77,10 @@ measured_effort = gravity_scale * KDL_gravity + gravity_bias
 ## 下一步人工试拖
 
 1. 保持空载和本次相同清场条件，专人守上游电闸。
-2. 用 `START_ELFIN_HARDWARE.sh --freedrive` 和 `START_ELFIN_PANEL.sh` 启动，正常 Servo On。
+2. 仅在事故复验完成并正式解除锁定后，才可用 `START_ELFIN_HARDWARE.sh --freedrive` 和 `START_ELFIN_PANEL.sh` 启动，正常 Servo On。
 3. 等 Panel 显示 `READY` 且“重力模型预检”通过。
 4. 一只手在远离夹点、容易控制的连杆位置做好轻扶，另一人不要接触机械臂。
-5. 按住实体 FREE 或点击 Panel“进入零力拖拽”；实体按钮现在按下即请求。等待 0.5 秒接管完成后先只轻推几毫米/几度，不能预先蓄力猛拉。
+5. 按住实体 FREE 或点击 Panel“进入零力拖拽”；实体按钮必须从首次高电平观测起保持至少 0.70 秒且取得 8 个高电平样本才产生请求。一次孤立低电平毛刺会被过滤，持续低电平会清空候选。等待接管完成后先只轻推几毫米/几度，不能预先蓄力猛拉。
 6. 松手确认没有持续自行加速，再松开 FREE/点击退出，确认 `READY` 和当前位置保持。
 7. 检查最新 trial CSV 后，才逐步扩大人工拖动范围并测试 POINT 记录。
 

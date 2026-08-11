@@ -12,10 +12,11 @@ GAZEBO_MASTER_URI=http://127.0.0.1:11346
 GAZEBO_GUI=false
 RVIZ=false
 RVIZ_EGL=false
+PANEL_GUI=true
 
 usage() {
     cat <<'EOF'
-Usage: start_elfin5_freedrive_sim.sh [--gazebo-gui] [--rviz|--rviz-egl]
+Usage: start_elfin5_freedrive_sim.sh [--gazebo-gui] [--rviz|--rviz-egl] [--no-panel-gui]
 
 Starts the Elfin5 effort simulation, MoveIt, Basic API and the Chinese Panel.
 It uses loopback-only ports and contains no EtherCAT hardware node.
@@ -23,6 +24,7 @@ It uses loopback-only ports and contains no EtherCAT hardware node.
   --gazebo-gui  Also open the Gazebo 3D window (higher GPU load).
   --rviz        Also open the low-load RViz configuration.
   --rviz-egl    Open low-load RViz through the Qt EGL fallback.
+  --no-panel-gui  Keep the Basic API running without its GTK Panel.
 EOF
 }
 
@@ -31,6 +33,7 @@ while (( $# > 0 )); do
         --gazebo-gui) GAZEBO_GUI=true ;;
         --rviz) RVIZ=true ;;
         --rviz-egl) RVIZ=true; RVIZ_EGL=true ;;
+        --no-panel-gui) PANEL_GUI=false ;;
         -h|--help) usage; exit 0 ;;
         *) usage >&2; exit 64 ;;
     esac
@@ -58,4 +61,5 @@ echo "Close the complete demo with Ctrl+C in this terminal."
 exec roslaunch elfin_robot_bringup elfin5_freedrive_demo.launch \
     gazebo_gui:="$GAZEBO_GUI" \
     rviz:="$RVIZ" \
-    rviz_egl:="$RVIZ_EGL"
+    rviz_egl:="$RVIZ_EGL" \
+    panel_gui:="$PANEL_GUI"

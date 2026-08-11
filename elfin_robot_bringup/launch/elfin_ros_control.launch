@@ -4,8 +4,11 @@
   <arg name="load_freedrive" default="true" />
   <arg name="start_freedrive_manager" default="true" />
   <arg name="allow_hardware_freedrive" default="false" />
- 
-  <node name="elfin_ros_control" pkg="elfin_ros_control" type="elfin_hardware_interface" output="screen">
+  <arg name="hardware_launch_prefix" default="" />
+
+  <node name="elfin_ros_control" pkg="elfin_ros_control"
+        type="elfin_hardware_interface" output="screen"
+        launch-prefix="$(arg hardware_launch_prefix)">
     <rosparam file="$(find elfin_robot_bringup)/config/elfin_drivers.yaml" command="load"/>
     <param name="elfin_ethernet_name" value="$(arg elfin_ethernet_name)" />
   </node>

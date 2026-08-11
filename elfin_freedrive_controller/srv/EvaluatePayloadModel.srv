@@ -1,0 +1,8 @@
+float64[6] joint_positions
+---
+bool success
+string message
+float64[6] base_effort
+float64[24] payload_regressor
+float64[6] effort_limits
+float64 maximum_gravity_effort_fraction

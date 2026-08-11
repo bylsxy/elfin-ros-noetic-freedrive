@@ -38,6 +38,9 @@ Created on Mon Nov 13 15:20:10 2017
 // author: Cong Liu
 
 #include "elfin_basic_api/elfin_teleop_api.h"
+#include <algorithm>
+#include <cmath>
+#include <sstream>
 
 namespace elfin_basic_api {
 ElfinTeleopAPI::ElfinTeleopAPI(moveit::planning_interface::MoveGroupInterface *group, std::string action_name, planning_scene_monitor::PlanningSceneMonitorPtr planning_scene_monitor):
@@ -50,6 +53,7 @@ ElfinTeleopAPI::ElfinTeleopAPI(moveit::planning_interface::MoveGroupInterface *g
 
     joint_teleop_server_=teleop_nh_.advertiseService("joint_teleop", &ElfinTeleopAPI::jointTeleop_cb, this);
     cart_teleop_server_=teleop_nh_.advertiseService("cart_teleop", &ElfinTeleopAPI::cartTeleop_cb, this);
+    cockpit_jog_server_=teleop_nh_.advertiseService("cockpit_teleop", &ElfinTeleopAPI::cockpitJog_cb, this);
     home_teleop_server_=teleop_nh_.advertiseService("home_teleop", &ElfinTeleopAPI::homeTeleop_cb, this);
     teleop_stop_server_=teleop_nh_.advertiseService("stop_teleop", &ElfinTeleopAPI::teleopStop_cb, this);
 
@@ -309,18 +313,12 @@ bool ElfinTeleopAPI::cartTeleop_cb(elfin_robot_msgs::SetInt16::Request &req, elf
 
     bool ik_have_result=true;
 
-    // Linear jogs keep the upstream 0.5 m planning window (100 * 5 mm).
-    // Rotational jogs used to share that same 100-point limit, which imposed
-    // an unrelated fixed stop after 2 rad (100 * 0.02 rad), even while the
-    // button was still held.  Let rotation continue until IK, collision,
-    // joint continuity or a physical joint bound stops it.  The very large
-    // point guard is only a defence against a pathological cyclic IK result;
-    // it corresponds to 100 rad and is not a normal jog limit.
-    const size_t linear_planning_points=100;
-    const size_t trajectory_point_guard=5000;
-    const size_t planning_point_limit=(operation_num<=3)
-                                      ? linear_planning_points
-                                      : trajectory_point_guard;
+    // Keep every press bounded to the Panel's proven 100-point window.
+    // A previous 5000-point rotational search could monopolize the single
+    // service callback queue, delaying the matching Stop request and making
+    // the cockpit appear frozen. Continuous operator control is provided by
+    // the trajectory duration, not by manufacturing thousands of IK points.
+    const size_t planning_point_limit=100;
     for(size_t i=0; ros::ok() && i<planning_point_limit; i++)
     {
         switch (operation_num) {
@@ -427,6 +425,161 @@ bool ElfinTeleopAPI::cartTeleop_cb(elfin_robot_msgs::SetInt16::Request &req, elf
     resp.message=result;
     return true;
 
+}
+
+bool ElfinTeleopAPI::cockpitJog_cb(elfin_robot_msgs::CockpitJog::Request &req,
+                                   elfin_robot_msgs::CockpitJog::Response &resp)
+{
+    const double forward=std::max(-1.0, std::min(1.0, req.forward));
+    const double strafe=std::max(-1.0, std::min(1.0, req.strafe));
+    const double vertical=std::max(-1.0, std::min(1.0, req.vertical));
+    const double yaw=std::max(-1.0, std::min(1.0, req.yaw));
+    const double pitch=std::max(-1.0, std::min(1.0, req.pitch));
+    const double roll=std::max(-1.0, std::min(1.0, req.roll));
+    const bool camera_needed=fabs(strafe)>1e-6 || fabs(pitch)>1e-6;
+    if(std::max(std::max(std::max(fabs(forward), fabs(strafe)),
+                         std::max(fabs(vertical), fabs(yaw))),
+                std::max(fabs(pitch), fabs(roll)))<=1e-6)
+    {
+        resp.success=false;
+        resp.message="cockpit jog vector is zero";
+        return true;
+    }
+
+    // The dashboard always controls the physical flange. Refuse an accidental
+    // alternate end link rather than silently applying mixed-frame motion to
+    // an unknown TCP.
+    if(end_link_!=default_tip_link_)
+    {
+        resp.success=false;
+        resp.message="cockpit jog requires the default flange end link";
+        return true;
+    }
+
+    tf::Quaternion flange_to_camera_rotation(0.0, 0.0, 0.0, 1.0);
+    if(camera_needed)
+    {
+        const std::string camera_frame=req.camera_frame.empty()
+                                       ? "camera_cockpit_optical_frame"
+                                       : req.camera_frame;
+        try
+        {
+            tf::StampedTransform flange_to_camera;
+            tf_listener_.waitForTransform(default_tip_link_, camera_frame,
+                                          ros::Time(0), ros::Duration(0.5));
+            tf_listener_.lookupTransform(default_tip_link_, camera_frame,
+                                         ros::Time(0), flange_to_camera);
+            flange_to_camera_rotation=flange_to_camera.getRotation();
+        }
+        catch(const tf::TransformException &ex)
+        {
+            ROS_ERROR("%s", ex.what());
+            resp.success=false;
+            resp.message="can't get offline cockpit camera frame";
+            return true;
+        }
+    }
+
+    geometry_msgs::PoseStamped current_pose=group_->getCurrentPose(end_link_);
+    std::vector<double> current_joint_states=group_->getCurrentJointValues();
+    robot_state::RobotStatePtr kinematic_state_ptr=group_->getCurrentState();
+    robot_state::RobotState kinematic_state=*kinematic_state_ptr;
+    const robot_state::JointModelGroup* joint_model_group =
+        kinematic_state.getJointModelGroup(group_->getName());
+
+    planning_scene_monitor_->updateFrameTransforms();
+    planning_scene::PlanningSceneConstPtr plan_scene=
+        planning_scene_monitor_->getPlanningScene();
+
+    trajectory_msgs::JointTrajectoryPoint point_tmp;
+    bool ik_have_result=true;
+    const size_t planning_point_limit=100;
+    const tf::Vector3 world_up(0.0, 0.0, 1.0);
+    const tf::Vector3 local_x(1.0, 0.0, 0.0);
+    const tf::Vector3 local_z(0.0, 0.0, 1.0);
+
+    for(size_t i=0; ros::ok() && i<planning_point_limit; i++)
+    {
+        tf::Quaternion flange_rotation(
+            current_pose.pose.orientation.x,
+            current_pose.pose.orientation.y,
+            current_pose.pose.orientation.z,
+            current_pose.pose.orientation.w);
+        flange_rotation.normalize();
+        const tf::Matrix3x3 flange_basis(flange_rotation);
+        const tf::Vector3 flange_forward=flange_basis*local_z;
+        const tf::Matrix3x3 camera_basis(
+            flange_rotation*flange_to_camera_rotation);
+        const tf::Vector3 camera_right=camera_basis*local_x;
+
+        tf::Vector3 linear=
+            flange_forward*forward + camera_right*strafe + world_up*vertical;
+        if(linear.length2()>1e-12)
+        {
+            linear.normalize();
+            current_pose.pose.position.x+=resolution_linear_*linear.x();
+            current_pose.pose.position.y+=resolution_linear_*linear.y();
+            current_pose.pose.position.z+=resolution_linear_*linear.z();
+        }
+
+        // All three angular components are expressed in the planning frame and
+        // combined into one bounded angular-velocity vector. This keeps a
+        // diagonal view command no faster than a single-axis command.
+        tf::Vector3 angular=
+            world_up*yaw + camera_right*pitch + flange_forward*roll;
+        if(angular.length2()>1e-12)
+        {
+            angular.normalize();
+            PoseStampedRotation(current_pose, angular, resolution_angle_);
+        }
+
+        tf::Pose tf_pose_tmp;
+        Eigen::Isometry3d affine_pose_tmp;
+        tf::poseMsgToTF(current_pose.pose, tf_pose_tmp);
+        tf::poseTFToEigen(tf_pose_tmp, affine_pose_tmp);
+
+        ik_have_result=kinematic_state.setFromIK(
+            joint_model_group, affine_pose_tmp, default_tip_link_);
+        if(!ik_have_result || goal_.trajectory.points.size()!=i)
+            break;
+
+        point_tmp.positions.resize(goal_.trajectory.joint_names.size());
+        double biggest_shift=0.0;
+        for(size_t j=0; j<goal_.trajectory.joint_names.size(); j++)
+        {
+            point_tmp.positions[j]=*kinematic_state.getJointPositions(
+                goal_.trajectory.joint_names[j]);
+            const double previous=(i==0)
+                ? current_joint_states[j]
+                : goal_.trajectory.points[i-1].positions[j];
+            biggest_shift=std::max(
+                biggest_shift, fabs(previous-point_tmp.positions[j]));
+        }
+        if(biggest_shift>COCKPIT_MAXIMUM_JOINT_STEP_CONST ||
+           plan_scene->isStateColliding(kinematic_state, group_->getName()))
+            break;
+
+        point_tmp.time_from_start=ros::Duration((i+1)*cart_duration_);
+        goal_.trajectory.points.push_back(point_tmp);
+    }
+
+    if(goal_.trajectory.points.empty())
+    {
+        resp.success=false;
+        resp.message="robot can't move safely in the combined cockpit direction; "
+                     "IK joint step or collision guard rejected it";
+        return true;
+    }
+
+    action_client_.sendGoal(goal_);
+    const size_t point_count=goal_.trajectory.points.size();
+    goal_.trajectory.points.clear();
+    resp.success=true;
+    std::stringstream result;
+    result << "robot is moving in combined cockpit direction; points="
+           << point_count;
+    resp.message=result.str();
+    return true;
 }
 
 bool ElfinTeleopAPI::homeTeleop_cb(std_srvs::SetBool::Request &req, std_srvs::SetBool::Response &resp)

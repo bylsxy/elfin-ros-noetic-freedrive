@@ -41,6 +41,16 @@ Created on Mon Sep 17 10:02:30 2018
 
 namespace elfin_ethercat_driver
 {
+namespace
+{
+const uint16_t CIA402_STATE_MASK = 0x006f;
+
+bool cia402StateIs(int16_t statusword, uint16_t expected)
+{
+    return (static_cast<uint16_t>(statusword) & CIA402_STATE_MASK) == expected;
+}
+}
+
 ElfinEtherCATClient::ElfinEtherCATClient(EtherCatManager *manager, int slave_no):
     manager_(manager), slave_no_(slave_no)
 {
@@ -592,8 +602,10 @@ bool ElfinEtherCATClient::recognizePose()
 
 bool ElfinEtherCATClient::isEnabled()
 {
-    if((readInput_half_unit(elfin_txpdo::AXIS1_STATUSWORD_L16, false) & 0xf)==0x7
-            && (readInput_half_unit(elfin_txpdo::AXIS2_STATUSWORD_L16, false) & 0xf)==0x7)
+    if(cia402StateIs(
+           readInput_half_unit(elfin_txpdo::AXIS1_STATUSWORD_L16, false), 0x0027)
+       && cia402StateIs(
+           readInput_half_unit(elfin_txpdo::AXIS2_STATUSWORD_L16, false), 0x0027))
         return true;
     else
         return false;
@@ -601,8 +613,10 @@ bool ElfinEtherCATClient::isEnabled()
 
 bool ElfinEtherCATClient::hasOperationEnabledAxis()
 {
-    return (readInput_half_unit(elfin_txpdo::AXIS1_STATUSWORD_L16, false) & 0xf) == 0x7
-        || (readInput_half_unit(elfin_txpdo::AXIS2_STATUSWORD_L16, false) & 0xf) == 0x7;
+    return cia402StateIs(
+               readInput_half_unit(elfin_txpdo::AXIS1_STATUSWORD_L16, false), 0x0027)
+        || cia402StateIs(
+               readInput_half_unit(elfin_txpdo::AXIS2_STATUSWORD_L16, false), 0x0027);
 }
 
 void *ElfinEtherCATClient::setEnable(void* threadarg)
@@ -650,14 +664,27 @@ void *ElfinEtherCATClient::setEnable(void* threadarg)
     clock_gettime(CLOCK_REALTIME, &tick);
     while(ros::ok())
     {
-        if(pthis->readInput_half_unit(elfin_txpdo::AXIS1_STATUSWORD_L16, false)==0x21
-           && pthis->readInput_half_unit(elfin_txpdo::AXIS2_STATUSWORD_L16, false)==0x21)
+        const int16_t axis1_status = pthis->readInput_half_unit(
+            elfin_txpdo::AXIS1_STATUSWORD_L16, false);
+        const int16_t axis2_status = pthis->readInput_half_unit(
+            elfin_txpdo::AXIS2_STATUSWORD_L16, false);
+        if(cia402StateIs(axis1_status, 0x0021)
+           && cia402StateIs(axis2_status, 0x0021))
         {
             break;
         }
         if(tick.tv_sec*1e+9+tick.tv_nsec - before.tv_sec*1e+9 - before.tv_nsec >= 2e+9)
         {
-            ROS_WARN("setEnable phase1 in slave %i failed", pthis->slave_no_);
+            ROS_WARN("setEnable phase1 in slave %i failed: statuswords "
+                     "axis1=0x%04x (state=0x%02x), axis2=0x%04x (state=0x%02x), "
+                     "expected state=0x21",
+                     pthis->slave_no_,
+                     static_cast<unsigned int>(static_cast<uint16_t>(axis1_status)),
+                     static_cast<unsigned int>(static_cast<uint16_t>(axis1_status)
+                                               & CIA402_STATE_MASK),
+                     static_cast<unsigned int>(static_cast<uint16_t>(axis2_status)),
+                     static_cast<unsigned int>(static_cast<uint16_t>(axis2_status)
+                                               & CIA402_STATE_MASK));
             setDisable(threadarg);
             return (void *)0;
         }
@@ -672,14 +699,27 @@ void *ElfinEtherCATClient::setEnable(void* threadarg)
     clock_gettime(CLOCK_REALTIME, &tick);
     while(ros::ok())
     {
-        if(pthis->readInput_half_unit(elfin_txpdo::AXIS1_STATUSWORD_L16, false)==0x23
-           && pthis->readInput_half_unit(elfin_txpdo::AXIS2_STATUSWORD_L16, false)==0x23)
+        const int16_t axis1_status = pthis->readInput_half_unit(
+            elfin_txpdo::AXIS1_STATUSWORD_L16, false);
+        const int16_t axis2_status = pthis->readInput_half_unit(
+            elfin_txpdo::AXIS2_STATUSWORD_L16, false);
+        if(cia402StateIs(axis1_status, 0x0023)
+           && cia402StateIs(axis2_status, 0x0023))
         {
             break;
         }
         if(tick.tv_sec*1e+9+tick.tv_nsec - before.tv_sec*1e+9 - before.tv_nsec >= 2e+9)
         {
-            ROS_WARN("setEnable phase2 in slave %i failed", pthis->slave_no_);
+            ROS_WARN("setEnable phase2 in slave %i failed: statuswords "
+                     "axis1=0x%04x (state=0x%02x), axis2=0x%04x (state=0x%02x), "
+                     "expected state=0x23",
+                     pthis->slave_no_,
+                     static_cast<unsigned int>(static_cast<uint16_t>(axis1_status)),
+                     static_cast<unsigned int>(static_cast<uint16_t>(axis1_status)
+                                               & CIA402_STATE_MASK),
+                     static_cast<unsigned int>(static_cast<uint16_t>(axis2_status)),
+                     static_cast<unsigned int>(static_cast<uint16_t>(axis2_status)
+                                               & CIA402_STATE_MASK));
             setDisable(threadarg);
             return (void *)0;
         }
@@ -694,14 +734,27 @@ void *ElfinEtherCATClient::setEnable(void* threadarg)
     clock_gettime(CLOCK_REALTIME, &tick);
     while(ros::ok())
     {
-        if(pthis->readInput_half_unit(elfin_txpdo::AXIS1_STATUSWORD_L16, false)==0x27
-           && pthis->readInput_half_unit(elfin_txpdo::AXIS2_STATUSWORD_L16, false)==0x27)
+        const int16_t axis1_status = pthis->readInput_half_unit(
+            elfin_txpdo::AXIS1_STATUSWORD_L16, false);
+        const int16_t axis2_status = pthis->readInput_half_unit(
+            elfin_txpdo::AXIS2_STATUSWORD_L16, false);
+        if(cia402StateIs(axis1_status, 0x0027)
+           && cia402StateIs(axis2_status, 0x0027))
         {
             break;
         }
         if(tick.tv_sec*1e+9+tick.tv_nsec - before.tv_sec*1e+9 - before.tv_nsec >= 2e+9)
         {
-            ROS_WARN("setEnable phase3 in slave %i failed", pthis->slave_no_);
+            ROS_WARN("setEnable phase3 in slave %i failed: statuswords "
+                     "axis1=0x%04x (state=0x%02x), axis2=0x%04x (state=0x%02x), "
+                     "expected state=0x27",
+                     pthis->slave_no_,
+                     static_cast<unsigned int>(static_cast<uint16_t>(axis1_status)),
+                     static_cast<unsigned int>(static_cast<uint16_t>(axis1_status)
+                                               & CIA402_STATE_MASK),
+                     static_cast<unsigned int>(static_cast<uint16_t>(axis2_status)),
+                     static_cast<unsigned int>(static_cast<uint16_t>(axis2_status)
+                                               & CIA402_STATE_MASK));
             setDisable(threadarg);
             return (void *)0;
         }

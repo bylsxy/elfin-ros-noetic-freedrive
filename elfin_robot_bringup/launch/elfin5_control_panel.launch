@@ -7,12 +7,17 @@
   <arg name="display" default="false" />
   <arg name="rviz_config" default="$(find elfin5_moveit_config)/launch/moveit_low_load.rviz" />
   <arg name="rviz_egl" default="false" />
+  <arg name="enable_octomap" default="false" />
+  <arg name="panel_gui" default="true" />
 
   <include file="$(find elfin5_moveit_config)/launch/moveit_planning_execution.launch">
     <arg name="display" value="$(arg display)" />
     <arg name="rviz_config" value="$(arg rviz_config)" />
     <arg name="rviz_egl" value="$(arg rviz_egl)" />
+    <arg name="enable_octomap" value="$(arg enable_octomap)" />
   </include>
 
-  <include file="$(find elfin_basic_api)/launch/elfin_basic_api.launch" />
+  <include file="$(find elfin_basic_api)/launch/elfin_basic_api.launch">
+    <arg name="start_gui" value="$(arg panel_gui)" />
+  </include>
 </launch>

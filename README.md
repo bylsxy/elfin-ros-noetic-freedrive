@@ -16,7 +16,7 @@
 | 实机型号 | Elfin E05 / Elfin5，3 个双轴关节从站 + 1 个末端 I/O 从站 |
 | EtherCAT | SOEM 枚举、自动识别机器人网卡、1 kHz `ros_control` 硬件接口 |
 | 常规控制 | Servo On/Off、清 Fault、六轴/笛卡尔点动、MoveIt 轨迹执行 |
-| 零力拖拽 | 空载多姿态重力标定和人工拖动已完成；2026-07-25 入口预载修复待再次小范围实机复验 |
+| 零力拖拽 | 空载多姿态重力标定和人工拖动已完成；最新新末端样本为 `1.241 kg`、重心半径 `0.461 m`、路径容量峰值 `82.5%`，待最多 1 秒带载保持与首次小范围实机验收 |
 | 实体按钮 | `DI bit 4 = POINT`，`DI bit 5 = FREE`，映射固定 |
 | 末端 I/O | `INPUT_0..2`、`OUTPUT_0..2` 已对齐；AI0/AI1、RS-485 暂无可用 ROS 协议节点 |
 | 灯环 | 发布厂家状态语义；现有驱动没有主动设置实体灯色的接口 |
@@ -26,7 +26,7 @@
 
 - **零力拖拽 / 手动示教**：自研 `elfin_freedrive_controller`，每周期按六轴角度计算 KDL 重力力矩，并叠加可调阻尼、关节限位墙、速度保护和力矩余量。
 - **无松闸切换**：位置控制器与力矩控制器通过 `controller_manager` 严格互斥切换；FREE 路径不释放机械抱闸。
-- **固定重力模型**：17 个空载静态样本、6 组双向到达姿态用于消除方向摩擦；不再把按键前的人手预载误学成负载。
+- **基础模型 + 自动负载辨识**：保留 17 个空载样本得到的机械臂基础模型；新夹爪、相机和线缆随动部分作为独立的总质量与法兰三维重心自动拟合，不再把按键前的人手预载误学成重力。
 - **中文控制面板**：关节、笛卡尔、Servo/Fault、3 DI/3 DO、POINT/FREE、拖拽阻尼、速度保护和维护诊断集中显示，窗口可缩放和滚动。
 - **一键启动与诊断**：自动检测 EtherCAT 网卡、清理死亡 ROS 注册、核验模型和 `/joint_states`，并提供离线全栈检查和碰撞后只停机诊断。
 - **MoveIt 与 Gazebo**：支持规划、自碰撞检查、RViz 交互目标、轨迹执行和隔离端口的无真机仿真。
@@ -56,6 +56,7 @@ MoveIt / RViz ─> 轨迹控制器 ┤
 | --- | --- |
 | [E05 新手手动操作手册](docs/e05_manual_operation.md) | 第一次编译、仿真、启动真机、使用 Panel、RViz 和停机 |
 | [零力拖拽控制器说明](elfin_freedrive_controller/README.md) | 理解状态机、重力预检、参数、日志和 FREE/POINT 行为 |
+| [未知末端负载一键标定](docs/e05_automatic_payload_calibration.md) | 更换夹爪、相机、剪刀或线缆后，理解高位自动辨识、回滚和安全边界 |
 | [空载标定与真机验收记录](docs/e05_freedrive_calibration_2026-07-24.md) | 查看标定数据、误退出根因、验证边界和待复验项 |
 | [末端 I/O 与接口总表](docs/e05_interface_inventory.md) | 查询 DI/DO、AI、RS-485、灯环、EtherCAT 模块和 ROS 接口 |
 | [Jetson 首次恢复记录](docs/e05_jetson_bringup_2026-07-20.md) | 复核设备、从站身份、本机标定、实时调度和首动证据 |
@@ -119,7 +120,7 @@ rosrun elfin_robot_bringup elfin_offline_smoke_test.sh
 
 1. Shell 语法检查；
 2. 全 catkin 工作区编译；
-3. freedrive 的 22 项按钮与数学单元测试；
+3. freedrive 的按钮、重力模型、负载回归与安全数学单元测试；
 4. E05 Xacro 展开和 URDF 解析；
 5. Python 语法检查；
 6. 关键 Gazebo、MoveIt、Panel、硬件和 freedrive launch 解析。
@@ -158,22 +159,26 @@ rosrun elfin_robot_bringup start_elfin5_hardware.sh
 rosrun elfin_robot_bringup start_elfin5_panel.sh --rviz
 ```
 
-仅在受监督的零力拖拽试验中，终端 A 才增加 `--freedrive`：
+> **事故锁已解除：** 2026-07-27 08:27:45，按用户明确指令移走活动事故锁；原文件已只读归档为 `/home/catas/.ros/ELFIN_FREEDRIVE_LOCKOUT.archived-20260727-082745`。下面的命令不再因事故锁直接退出，但这不代表新末端通过验证：当前正式负载仍为 `0 kg`，六轴模型误差和力矩容量等硬门禁继续生效。详见 [事故记录](docs/e05_freedrive_incident_2026-07-26.md)。
+
+仅在空载或负载模型受支持、并满足现场安全条件的受监督零力拖拽试验中，终端 A 才增加 `--freedrive`：
 
 ```bash
 rosrun elfin_robot_bringup start_elfin5_hardware.sh --freedrive
 ```
 
-此参数只开放管理器门禁，不会自动 Servo On、进入 CST 或移动。实体 FREE 的新按下沿或 Panel 请求仍需逐项通过状态新鲜度、静止、Fault、Servo、控制器、模型方向和力矩容量检查。
+此参数只开放管理器门禁，不会自动 Servo On、进入 CST 或移动。实体 FREE 必须从第一次观测到高电平起保持至少 `0.70 秒`，并取得至少 8 个 10 Hz 高电平样本；允许过滤一次孤立的低电平毛刺，持续低电平会清空本次候选。Panel 请求也必须逐项通过状态新鲜度、静止、Fault、Servo、控制器和六轴模型误差等硬门禁。
 
 ## FREE 与 POINT
 
 | 输入 | 固定映射 | 行为 |
 | --- | --- | --- |
 | POINT | 原始 DI 字的 bit 4 | 每个按下沿持久记录一次时间与六轴关节位置，不发送轨迹 |
-| FREE | 原始 DI 字的 bit 5 | 按下请求进入重力补偿，保持期间可手动拖动，松开后在新位置恢复位置保持 |
+| FREE | 原始 DI 字的 bit 5 | 连续按住约 `0.70--0.80 秒`才会满足软件的 0.70 秒/8 样本确认；保持期间可手动拖动，松开后在新位置恢复位置保持 |
 
 FREE 不会打开机械抱闸。管理器在切入前被动观察位置模式下的反馈力矩；该数据用于预检和 0.5 秒无跳变交接，不再用于在线改变固定重力倍率。更换夹爪、相机或负载后，必须重新标定，不能靠按住 FREE 前施力“调重力”。
+
+Panel 的“拖拽高级”提供“高位一键标定未知末端”：主体辨识始终在普通位置控制下完成，6 个双向姿态拟合总质量和三维重心、2 个独立姿态验算，最后才做默认 0.8 秒且硬上限 1 秒的高阻尼零力保持。完整前置条件和物理边界见 [未知末端负载一键标定](docs/e05_automatic_payload_calibration.md)。
 
 运行数据默认保存到 `$ROS_HOME`，未设置时使用 `~/.ros`：
 
@@ -182,11 +187,14 @@ elfin_freedrive_points.yaml
 elfin_freedrive_trials/
 elfin_freedrive_gravity_samples.csv
 elfin_freedrive_gravity_candidate.yaml
+elfin_freedrive_payload.yaml
+elfin_payload_calibration_runs/
 ```
 
 ## 已知边界
 
 - 当前重力标定只覆盖这台 E05 的空载、无末端工具状态。
+- 自动负载辨识只能把法兰之后的物体近似成一个牢固的刚性总质量与固定重心；未知外形碰撞、松动部件和姿态相关线缆拉力不能被保证，留出姿态不一致时会拒绝。
 - 2026-07-25 最新误退出来自旧入口自适应：人手预载使倍率估计降到 `0.544`，钳位后仍欠补偿，J3 最终超过 `0.4 rad/s`。该自适应现已在配置和源码缺省值中关闭，但修复后仍需重新做受监督真机复验。
 - 速度、关节、Fault、通信和控制器丢失保护仍然保留；不应为了连续拖动而删除这些退出条件。
 - 末端 `AI0/AI1` 和 `485_A/B` 只有物理端子信息，当前驱动没有完整解码或协议节点。

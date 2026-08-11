@@ -1,6 +1,9 @@
 #include <gtest/gtest.h>
 
 #include <elfin_freedrive_controller/freedrive_math.h>
+#include <elfin_freedrive_controller/payload_model.h>
+
+#include <kdl/chaindynparam.hpp>
 
 #include <cmath>
 
@@ -32,15 +35,30 @@ TEST(ElfinFreedriveMath, SmoothStepHasBoundedEndpoints) {
   EXPECT_DOUBLE_EQ(math::smoothStep(0.5), 0.5);
 }
 
+TEST(ElfinFreedriveMath, SettlingHandoffStartsAtPreviousCommand) {
+  EXPECT_DOUBLE_EQ(
+      math::settlingHandoffCommand(8.0, -2.0, 0.0, 0.10), 8.0);
+  EXPECT_DOUBLE_EQ(
+      math::settlingHandoffCommand(8.0, -2.0, 0.10, 0.10), -2.0);
+  EXPECT_NEAR(
+      math::settlingHandoffCommand(8.0, -2.0, 0.05, 0.10), 3.0, 1e-12);
+}
+
+TEST(ElfinFreedriveMath, UserScaleCannotRelaxTransitionProtection) {
+  EXPECT_DOUBLE_EQ(math::transitionVelocityScale(3.0, true), 1.0);
+  EXPECT_DOUBLE_EQ(math::transitionVelocityScale(0.5, true), 0.5);
+  EXPECT_DOUBLE_EQ(math::transitionVelocityScale(3.0, false), 3.0);
+}
+
 TEST(ElfinFreedriveMath, VelocityScaleHasExplicitSafeBounds) {
-  EXPECT_TRUE(math::velocityScaleValid(0.5, 0.5, 2.0));
-  EXPECT_TRUE(math::velocityScaleValid(1.5, 0.5, 2.0));
-  EXPECT_TRUE(math::velocityScaleValid(2.0, 0.5, 2.0));
-  EXPECT_FALSE(math::velocityScaleValid(0.49, 0.5, 2.0));
-  EXPECT_FALSE(math::velocityScaleValid(2.01, 0.5, 2.0));
+  EXPECT_TRUE(math::velocityScaleValid(0.5, 0.5, 3.0));
+  EXPECT_TRUE(math::velocityScaleValid(1.5, 0.5, 3.0));
+  EXPECT_TRUE(math::velocityScaleValid(3.0, 0.5, 3.0));
+  EXPECT_FALSE(math::velocityScaleValid(0.49, 0.5, 3.0));
+  EXPECT_FALSE(math::velocityScaleValid(3.01, 0.5, 3.0));
   EXPECT_FALSE(math::velocityScaleValid(
-      std::numeric_limits<double>::quiet_NaN(), 0.5, 2.0));
-  EXPECT_FALSE(math::velocityScaleValid(1.0, 0.0, 2.0));
+      std::numeric_limits<double>::quiet_NaN(), 0.5, 3.0));
+  EXPECT_FALSE(math::velocityScaleValid(1.0, 0.0, 3.0));
 }
 
 TEST(ElfinFreedriveMath, GravityEffortCapacityHasReservedHeadroom) {
@@ -50,6 +68,28 @@ TEST(ElfinFreedriveMath, GravityEffortCapacityHasReservedHeadroom) {
   EXPECT_FALSE(math::gravityEffortHasCapacity(
       std::numeric_limits<double>::quiet_NaN(), 65.0, 0.90));
   EXPECT_FALSE(math::gravityEffortHasCapacity(10.0, 0.0, 0.90));
+}
+
+TEST(ElfinFreedriveMath, HardLimitBandAllowsMotionAwayFromEntryPose) {
+  EXPECT_FALSE(math::hardLimitStopRequired(
+      -3.121, 0.0, -3.121, -3.14, 3.14, 0.02, 0.02, 0.003));
+  EXPECT_FALSE(math::hardLimitStopRequired(
+      -3.118, 0.02, -3.121, -3.14, 3.14, 0.02, 0.02, 0.003));
+}
+
+TEST(ElfinFreedriveMath, HardLimitBandStopsMotionTowardOrBeyondLimit) {
+  EXPECT_TRUE(math::hardLimitStopRequired(
+      -3.121, -0.021, -3.121, -3.14, 3.14, 0.02, 0.02, 0.003));
+  EXPECT_TRUE(math::hardLimitStopRequired(
+      -3.125, 0.0, -3.121, -3.14, 3.14, 0.02, 0.02, 0.003));
+  EXPECT_TRUE(math::hardLimitStopRequired(
+      -3.141, 0.0, -3.121, -3.14, 3.14, 0.02, 0.02, 0.003));
+  EXPECT_TRUE(math::hardLimitStopRequired(
+      3.121, 0.021, 3.121, -3.14, 3.14, 0.02, 0.02, 0.003));
+  EXPECT_TRUE(math::hardLimitStopRequired(
+      3.125, 0.0, 3.121, -3.14, 3.14, 0.02, 0.02, 0.003));
+  EXPECT_TRUE(math::hardLimitStopRequired(
+      3.141, 0.0, 3.121, -3.14, 3.14, 0.02, 0.02, 0.003));
 }
 
 TEST(ElfinFreedriveMath, E05HighLoadJ2PoseFitsTwentyPercentEnvelope) {
@@ -90,6 +130,17 @@ TEST(ElfinFreedriveMath, GravityValidationRequiresExcitation) {
   const auto result = math::validateGravityObservation(
       std::vector<double>{0.0, 0.1}, std::vector<double>{0.0, 2.0}, 0.5);
   EXPECT_FALSE(result.sufficient_excitation);
+}
+
+TEST(ElfinFreedriveMath, AbsoluteErrorIncludesUnexcitedPayloadAxes) {
+  const std::vector<double> stale_model{0.0, -35.0, 15.6, 0.7, 0.55, 0.0};
+  const std::vector<double> measured{-3.6, -62.7, 26.3, -1.7, 8.0, -1.2};
+  const math::EffortModelError error =
+      math::maximumAbsoluteEffortError(stale_model, measured);
+  ASSERT_TRUE(error.valid);
+  EXPECT_EQ(error.joint, 1U);
+  EXPECT_NEAR(error.maximum_absolute_error, 27.7, 1e-12);
+  EXPECT_GT(std::abs(measured[4] - stale_model[4]), 5.0);
 }
 
 TEST(ElfinFreedriveMath, GravityValidationRejectsOneReversedLoadedJoint) {
@@ -223,6 +274,73 @@ TEST(ElfinFreedriveMath, OppositeApproachesIgnoreOneWayAndInvalidInput) {
   EXPECT_TRUE(math::centerOppositeApproaches(
                   {start, malformed, start}, 0, 0.05, 0.02)
                   .empty());
+}
+
+TEST(ElfinPayloadModel, RegressorMatchesKdlRigidPayloadGravity) {
+  namespace payload = elfin_freedrive_controller::payload;
+  KDL::Chain chain;
+  const std::array<KDL::Vector, 6> axes{{
+      KDL::Vector(0.0, 1.0, 0.0), KDL::Vector(0.0, 0.0, 1.0),
+      KDL::Vector(1.0, 0.0, 0.0), KDL::Vector(0.0, 1.0, 0.0),
+      KDL::Vector(0.0, 0.0, 1.0), KDL::Vector(1.0, 0.0, 0.0)}};
+  for (std::size_t joint = 0; joint < axes.size(); ++joint) {
+    chain.addSegment(KDL::Segment(
+        "link" + std::to_string(joint + 1),
+        KDL::Joint("joint" + std::to_string(joint + 1), KDL::Vector::Zero(),
+                   axes[joint], KDL::Joint::RotAxis),
+        KDL::Frame(KDL::Vector(0.12, 0.03, 0.08))));
+  }
+
+  KDL::JntArray position(6);
+  for (std::size_t joint = 0; joint < 6; ++joint) {
+    position(joint) = 0.11 * static_cast<double>(joint + 1);
+  }
+  const KDL::Vector gravity(0.0, 0.0, -9.81);
+  KDL::ChainJntToJacSolver jacobian_solver(chain);
+  KDL::ChainFkSolverPos_recursive fk_solver(chain);
+  KDL::Jacobian jacobian(6);
+  payload::Regressor regressor{};
+  ASSERT_TRUE(payload::buildRegressor(position, gravity, jacobian_solver,
+                                      fk_solver, jacobian, regressor));
+
+  payload::Model model;
+  model.mass = 2.4;
+  model.center_of_mass = {{0.09, -0.04, 0.16}};
+  const payload::JointEffort predicted = payload::evaluate(regressor, model);
+
+  KDL::Chain extended = chain;
+  extended.addSegment(KDL::Segment(
+      "payload", KDL::Joint("payload_fixed", KDL::Joint::None),
+      KDL::Frame::Identity(),
+      KDL::RigidBodyInertia(
+          model.mass,
+          KDL::Vector(model.center_of_mass[0], model.center_of_mass[1],
+                      model.center_of_mass[2]),
+          KDL::RotationalInertia())));
+  KDL::ChainDynParam dynamics(extended, gravity);
+  KDL::JntArray expected(6);
+  ASSERT_EQ(dynamics.JntToGravity(position, expected), 0);
+  for (std::size_t joint = 0; joint < 6; ++joint) {
+    EXPECT_NEAR(predicted[joint], expected(joint), 1e-9);
+  }
+}
+
+TEST(ElfinPayloadModel, RejectsImpossibleMassAndCenterOfMass) {
+  namespace payload = elfin_freedrive_controller::payload;
+  payload::Model model;
+  model.mass = 5.0;
+  model.center_of_mass = {{0.1, -0.1, 0.2}};
+  EXPECT_TRUE(payload::valid(model, 5.0));
+  model.mass = 5.01;
+  EXPECT_FALSE(payload::valid(model, 5.0));
+  model.mass = 0.466;
+  model.center_of_mass = {{0.057, -0.063, 0.891}};
+  EXPECT_TRUE(payload::valid(model, 5.0));
+  model.mass = 2.0;
+  model.center_of_mass[2] = std::numeric_limits<double>::max();
+  EXPECT_FALSE(payload::valid(model, 5.0));
+  model.center_of_mass[2] = std::numeric_limits<double>::infinity();
+  EXPECT_FALSE(payload::valid(model, 5.0));
 }
 
 int main(int argc, char** argv) {

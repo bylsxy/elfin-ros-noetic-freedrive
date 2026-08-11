@@ -3,6 +3,8 @@
 
 #include <elfin_freedrive_controller/FreedriveTelemetry.h>
 #include <elfin_freedrive_controller/SetDampingScales.h>
+#include <elfin_freedrive_controller/SetPayloadModel.h>
+#include <elfin_freedrive_controller/payload_model.h>
 #include <elfin_robot_msgs/SetFloat64.h>
 #include <controller_interface/controller.h>
 #include <hardware_interface/joint_command_interface.h>
@@ -36,7 +38,9 @@ enum Status : uint8_t {
   kStatusModelMismatch = 5,
   kStatusSettling = 6,
   kStatusModelWarning = 7,
-  kStatusGravityCapacity = 8
+  kStatusGravityCapacity = 8,
+  kStatusHardLimit = 9,
+  kStatusOverspeed = 10
 };
 
 class ElfinFreedriveController
@@ -68,6 +72,9 @@ private:
                         elfin_robot_msgs::SetFloat64::Response& response);
   bool setDampingScales(SetDampingScales::Request& request,
                         SetDampingScales::Response& response);
+  bool setPayloadModel(SetPayloadModel::Request& request,
+                       SetPayloadModel::Response& response);
+  bool updatePayloadEffort();
 
   std::vector<std::string> joint_names_;
   std::vector<hardware_interface::JointHandle> joints_;
@@ -77,8 +84,14 @@ private:
   KDL::Chain chain_;
   KDL::Vector gravity_vector_;
   boost::shared_ptr<KDL::ChainDynParam> dynamics_;
+  boost::shared_ptr<KDL::ChainJntToJacSolver> payload_jacobian_solver_;
+  boost::shared_ptr<KDL::ChainFkSolverPos_recursive> payload_fk_solver_;
   KDL::JntArray q_chain_;
   KDL::JntArray gravity_torque_chain_;
+  KDL::Jacobian payload_jacobian_;
+  payload::Regressor payload_regressor_;
+  payload::JointEffort payload_effort_;
+  realtime_tools::RealtimeBuffer<payload::Model> payload_model_;
 
   std::vector<double> lower_limits_;
   std::vector<double> upper_limits_;
@@ -94,20 +107,25 @@ private:
   std::vector<double> last_command_;
   std::vector<double> desired_command_;
   std::vector<double> initial_effort_;
+  std::vector<double> entry_positions_;
   std::vector<double> gravity_joint_scales_;
   std::vector<double> effective_gravity_scales_;
   std::vector<double> gravity_bias_;
   std::vector<double> gravity_command_;
   std::vector<double> settle_damping_;
+  std::vector<double> settle_base_effort_;
+  std::vector<double> settle_entry_command_;
 
   double gravity_scale_;
   double handoff_duration_;
+  double settle_handoff_duration_;
   double minimum_validation_effort_;
   unsigned int minimum_validation_joints_;
   double minimum_model_alignment_;
   double minimum_model_scale_;
   double maximum_model_scale_;
   double maximum_model_residual_;
+  double maximum_entry_effort_error_;
   double minimum_adaptive_scale_;
   double maximum_adaptive_scale_;
   double maximum_gravity_effort_fraction_;
@@ -116,16 +134,21 @@ private:
   double limit_damping_;
   double velocity_limit_damping_;
   double hard_limit_margin_;
+  double hard_limit_toward_velocity_;
+  double hard_limit_inward_travel_;
   double hard_stop_damping_;
   std::atomic<double> velocity_limit_scale_;
   double minimum_velocity_limit_scale_;
   double maximum_velocity_limit_scale_;
   double minimum_damping_scale_;
   double maximum_damping_scale_;
+  double maximum_payload_mass_;
   bool require_model_validation_;
   bool allow_model_validation_warning_;
   bool gravity_calibration_verified_;
   bool adaptive_entry_scale_;
+  std::atomic<bool> controlled_hold_validation_;
+  std::atomic<bool> payload_hold_verified_;
   bool command_initialized_;
   bool model_validation_passed_;
   bool model_validation_warning_;
@@ -137,9 +160,11 @@ private:
   double model_normalized_residual_;
   double minimum_warning_alignment_;
   double handoff_progress_;
+  bool settle_active_;
   std::atomic<bool> settle_requested_;
   std::atomic<bool> running_;
   ros::Time started_time_;
+  ros::Time settle_started_time_;
   ros::Time last_status_time_;
   ros::Time last_state_time_;
 
@@ -149,6 +174,7 @@ private:
   ros::ServiceServer settle_server_;
   ros::ServiceServer velocity_scale_server_;
   ros::ServiceServer damping_scales_server_;
+  ros::ServiceServer payload_model_server_;
 };
 
 }  // namespace elfin_freedrive_controller

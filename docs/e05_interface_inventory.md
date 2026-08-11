@@ -72,9 +72,9 @@
 | 实体按键 | 固定输入位 | Panel 行为 |
 | --- | --- | --- |
 | `POINT` | DI bit 4 | 按下沿把时间与 J1..J6 弧度持久写入 `~/.ros/elfin_freedrive_points.yaml`；不发送轨迹 |
-| `FREE` | DI bit 5 | 连续按住约 1 秒后请求位置控制器切换到有界重力补偿；松开后等待静止并恢复当前位置保持 |
+| `FREE` | DI bit 5 | 从首次高电平观测起至少持续 `0.70 秒`且至少收到 8 个 10 Hz 高电平样本后，才请求切换到有界重力补偿；一次孤立低电平毛刺会被过滤，持续低电平会清空候选；确认松开后按保护路径恢复当前位置保持 |
 
-这两个内部按键位不等于末端接线端子的 `INPUT_0..2`（DI bit 0..2），Panel 不再运行时猜测或临时学习映射。短按 FREE 在 1 秒内释放时不发送命令；管理器启动时若发现 FREE 已经按下，也必须先看到一次释放再允许触发。
+这两个内部按键位不等于末端接线端子的 `INPUT_0..2`（DI bit 0..2），Panel 不再运行时猜测或临时学习映射。管理器启动时若发现 FREE 已经按下，必须先看到一次释放，再允许下一次连续按压确认，避免启动时误进入。2026-07-26 事故锁已在 2026-07-27 按用户指令解除；按钮长按、负载模型和其他运行门禁保持不变，详见 [事故记录](e05_freedrive_incident_2026-07-26.md)。
 
 当前新增的 `elfin_freedrive_controller` 使用驱动原有 CST/力矩模式和 KDL 动力学模型实现重力补偿。它与“全部松抱闸”完全不同：Servo 保持使能、每轴持续受力矩上限/变化率/速度/关节限位约束，且 FREE 行为永远不会调用 `open_brake_slaveX` 或 `close_brake_slaveX`。受保护的单模块松闸仍只在维护窗口中提供。
 
@@ -122,6 +122,8 @@ elfin_ethercat_driver/src/elfin_ethercat_io_client.cpp
 | --- | --- |
 | `/elfin_freedrive_manager/set_freedrive` | `SetBool(true)` 请求进入，`false` 请求退出；真机默认由启动门禁锁定 |
 | `/elfin_freedrive_manager/record_point` | 立即持久记录当前六轴姿态，不运动 |
+| `/elfin_freedrive_manager/list_recorded_points` | 返回实际 YAML 路径、序号、时间、来源和 J1--J6；供姿态管理窗口逐条展示 |
+| `/elfin_freedrive_manager/delete_recorded_point` | 删除指定序号，原子重写 YAML 并连续重排其余序号 |
 | `/elfin_freedrive_manager/state`、`state_detail`、`active` | Panel 使用的状态、完整原因和活动标志 |
 | `/elfin_freedrive_manager/recorded_point`、`point_count` | 最近记录姿态与累计数量 |
 | `/elfin_freedrive_controller/command_state` | 控制器的六轴位置、速度和实际下发力矩 |
@@ -132,12 +134,17 @@ elfin_ethercat_driver/src/elfin_ethercat_io_client.cpp
 | `/elfin_freedrive_manager/trial_log_path` | 本次 CSV 的绝对路径 |
 | `/elfin_freedrive_manager/record_gravity_sample` | 仅在位置控制、静止、Servo On、无 Fault 时记录一组被动标定样本 |
 | `/elfin_freedrive_manager/fit_gravity_calibration` | 对双向成对姿态抵消静摩擦后拟合，并生成候选 YAML；不会热改控制器 |
+| `/elfin_freedrive_manager/get_payload_model` | 读取当前末端总质量、法兰三维重心、验证指标、同步状态和 YAML 路径 |
+| `/elfin_freedrive_manager/set_payload_model` | 仅在 FREE 停止时暂存/持久化或回滚经过验证的末端负载模型 |
+| `/elfin_freedrive_manager/evaluate_payload_model` | 返回指定六轴姿态的空臂重力、末端线性回归矩阵和力矩容量，供自动标定只读计算 |
 
 进入条件包括：六轴状态新鲜完整、速度低于 `0.02 rad/s`、Servo On、无 Fault、位置控制器在线、本次真机启动显式允许 freedrive，并且位置模式下的反馈保持力矩通过 KDL 方向/比例/残差预检。管理器用 `STRICT` 原子切换保证位置控制与力矩控制不会同时占用六轴。FREE 松开或保护触发后先请求增强阻尼；正常恢复状态为 `EXITING -> READY`，保护恢复为 `RECOVERING -> READY`，真机直接切回失败时可短暂显示 `HOLDING`，表示驱动器已用当前编码器位置进入 CSP 且管理器正在恢复 ROS 位置控制器。只有位置保持完全无法建立时才请求 Servo Off。
 
-控制器每周期按当前六轴角度重新计算 URDF/KDL 重力力矩，并叠加阻尼、软关节限位和超速阻尼；活动拖拽没有位置弹簧。CST 入口先沿用位置模式实测保持力矩，再用 0.5 秒平滑过渡到固定的多姿态标定模型。本机空载 J2/J3 已用 17 个 CSP 静态样本、6 组相反到达方向的姿态中心完成标定；显式每轴上限为 `[15, 84, 30, 15, 8, 8] Nm`，模型重力达到其中任一轴 90% 时拒绝/退出。每次试验 CSV 默认保存在 `$ROS_HOME/elfin_freedrive_trials/`，未设置 `ROS_HOME` 时为 `~/.ros/elfin_freedrive_trials/`。2026-07-25 已完成人工空载拖动并依据日志关闭会误学预载的入口自适应；修复后的小范围真机复验、带末端负载状态和实体灯环是否由固件自动变蓝仍未验证。详见 `docs/e05_freedrive_calibration_2026-07-24.md`。
+控制器每周期按当前六轴角度重新计算 URDF/KDL 重力力矩，并叠加阻尼、软关节限位和超速阻尼；活动拖拽没有位置弹簧。CST 入口先沿用位置模式实测保持力矩，再用 0.5 秒平滑过渡到固定的多姿态标定模型。本机空载 J2/J3 已用 17 个 CSP 静态样本、6 组相反到达方向的姿态中心完成标定；显式每轴上限为 `[15, 84, 36, 15, 10, 8] Nm`，模型重力达到其中任一轴 90% 时拒绝/退出。每次试验 CSV 默认保存在 `$ROS_HOME/elfin_freedrive_trials/`，未设置 `ROS_HOME` 时为 `~/.ros/elfin_freedrive_trials/`。2026-07-25 已完成人工空载拖动并依据日志关闭会误学预载的入口自适应；新末端候选已通过离线测量和容量复算，仍待最多 1 秒真机保持验证；实体灯环是否由固件自动变蓝也尚未验证。详见 `docs/e05_freedrive_calibration_2026-07-24.md`。
 
 旧硬件接口曾把反馈 `axis.effort` 转为目标力矩，导致 effort 控制器命令没有真正写入 EtherCAT。现已改为 `axis.effort_cmd`，并在 CST 入口预置实测保持力矩、CSP 入口同步当前编码器位置、饱和目标力矩 PDO。2026-07-24 空载真机静态试验已验证完整交接和恢复，但带载与人工手感仍须分开验收。
+
+Panel“拖拽高级”已接入自动末端负载标定。它在普通位置控制下用 6 个双向姿态拟合总质量和法兰三维重心，再用 2 个独立姿态、路径力矩容量和最长 1 秒高阻尼保持做验证；成功后保存到 `~/.ros/elfin_freedrive_payload.yaml`。它不能识别未知末端外形，也不能把姿态相关的柔性线缆拉力精确化为固定重心，完整边界见 `docs/e05_automatic_payload_calibration.md`。
 
 ### 7.3 三个双轴模块
 
@@ -159,9 +166,11 @@ elfin_ethercat_driver/src/elfin_ethercat_io_client.cpp
 
 | 组件 | 负责 | 不负责 |
 | --- | --- | --- |
-| Panel | Servo/Fault、低速人工点动、3 DI/3 DO、POINT 持久记录、FREE 零力拖拽、维护诊断 | 自动生成采摘逻辑、感知未知障碍、直接指定实体灯色 |
+| Panel | Servo/Fault、低速人工点动、3 DI/3 DO、POINT 姿态管理、FREE 零力拖拽、会话日志、维护诊断 | 自动生成采摘逻辑、感知未知障碍、直接指定实体灯色 |
 | MoveIt `move_group` | 运动学、规划、自碰撞和已加入场景物体的碰撞检查、轨迹执行接口 | 自动知道现实桌子/相机位置、直接采集深度图 |
 | RViz | 显示模型与规划场景、拖动交互标记、Plan 预览、Execute 请求 | 机械臂底层驱动、急停、轨迹长期存储 |
 | RealSense / 感知节点 | 未来提供点云、目标位姿、深度信息 | 未配置时不会自动进入 MoveIt OctoMap |
 
 因此视觉采摘的正确后续顺序是：先标定相机与机器人坐标系，再把深度障碍加入 planning scene，最后由 MoveIt 规划并通过标准轨迹控制器执行。Panel 是人工接管和诊断入口，不应承载整套自动采摘算法。
+
+Panel 主界面按功能内聚为四个紧凑矩形模块：六关节点动、六维末端点动、接管与 `OUTPUT_0..2`、机器人状态与 `INPUT_0..2`/POINT/FREE；底部会话日志持续追加。姿态文件管理、完整拖拽阈值与逐轴阻尼、危险抱闸操作分别放在“姿态管理”“拖拽高级”“维护”窗口，避免把所有接口横向堆进主操作区。

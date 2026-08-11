@@ -4,8 +4,10 @@
  # publish the current configuration of the robot (simulated or real)
  # and the current state of the world as seen by the planner
   
+ <arg name="enable_octomap" default="false"/>
  <include file="$(find elfin5_moveit_config)/launch/move_group.launch">
   <arg name="publish_monitored_planning_scene" value="true" />
+  <arg name="enable_octomap" value="$(arg enable_octomap)" />
  </include>
  # The visualization component of MoveIt!
  <arg name="display" default="false"/>

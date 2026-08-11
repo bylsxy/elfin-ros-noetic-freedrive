@@ -14,12 +14,14 @@ ElfinFreedriveController::ElfinFreedriveController()
     : gravity_vector_(0.0, 0.0, -9.81),
       gravity_scale_(1.0),
       handoff_duration_(0.5),
+      settle_handoff_duration_(0.10),
       minimum_validation_effort_(1.5),
       minimum_validation_joints_(2),
       minimum_model_alignment_(0.90),
       minimum_model_scale_(0.50),
       maximum_model_scale_(2.0),
       maximum_model_residual_(0.30),
+      maximum_entry_effort_error_(5.0),
       minimum_adaptive_scale_(0.50),
       maximum_adaptive_scale_(2.0),
       maximum_gravity_effort_fraction_(0.90),
@@ -28,16 +30,21 @@ ElfinFreedriveController::ElfinFreedriveController()
       limit_damping_(0.5),
       velocity_limit_damping_(2.0),
       hard_limit_margin_(0.02),
+      hard_limit_toward_velocity_(0.02),
+      hard_limit_inward_travel_(0.003),
       hard_stop_damping_(12.0),
       velocity_limit_scale_(1.0),
       minimum_velocity_limit_scale_(0.50),
-      maximum_velocity_limit_scale_(2.0),
-      minimum_damping_scale_(0.25),
-      maximum_damping_scale_(2.0),
+      maximum_velocity_limit_scale_(3.0),
+      minimum_damping_scale_(0.05),
+      maximum_damping_scale_(5.0),
+      maximum_payload_mass_(5.0),
       require_model_validation_(true),
       allow_model_validation_warning_(true),
       gravity_calibration_verified_(false),
       adaptive_entry_scale_(false),
+      controlled_hold_validation_(false),
+      payload_hold_verified_(false),
       command_initialized_(false),
       model_validation_passed_(false),
       model_validation_warning_(false),
@@ -49,6 +56,7 @@ ElfinFreedriveController::ElfinFreedriveController()
       model_normalized_residual_(0.0),
       minimum_warning_alignment_(0.50),
       handoff_progress_(0.0),
+      settle_active_(false),
       settle_requested_(false),
       running_(false) {}
 
@@ -176,6 +184,8 @@ bool ElfinFreedriveController::init(
 
   controller_nh.param("gravity_scale", gravity_scale_, 1.0);
   controller_nh.param("handoff_duration", handoff_duration_, 0.5);
+  controller_nh.param("settle_handoff_duration",
+                      settle_handoff_duration_, 0.10);
   controller_nh.param("minimum_validation_effort",
                       minimum_validation_effort_, 1.5);
   int minimum_validation_joints = 2;
@@ -187,6 +197,8 @@ bool ElfinFreedriveController::init(
   controller_nh.param("maximum_model_scale", maximum_model_scale_, 2.0);
   controller_nh.param("maximum_model_residual",
                       maximum_model_residual_, 0.30);
+  controller_nh.param("maximum_entry_effort_error",
+                      maximum_entry_effort_error_, 5.0);
   controller_nh.param("minimum_adaptive_scale",
                       minimum_adaptive_scale_, 0.50);
   controller_nh.param("maximum_adaptive_scale",
@@ -204,6 +216,10 @@ bool ElfinFreedriveController::init(
   controller_nh.param("adaptive_entry_scale", adaptive_entry_scale_, false);
   controller_nh.param("limit_margin", limit_margin_, 0.08);
   controller_nh.param("hard_limit_margin", hard_limit_margin_, 0.02);
+  controller_nh.param("hard_limit_toward_velocity",
+                      hard_limit_toward_velocity_, 0.02);
+  controller_nh.param("hard_limit_inward_travel",
+                      hard_limit_inward_travel_, 0.003);
   controller_nh.param("limit_stiffness", limit_stiffness_, 5.0);
   controller_nh.param("limit_damping", limit_damping_, 0.5);
   controller_nh.param("velocity_limit_damping", velocity_limit_damping_, 2.0);
@@ -213,13 +229,16 @@ bool ElfinFreedriveController::init(
   controller_nh.param("minimum_velocity_limit_scale",
                       minimum_velocity_limit_scale_, 0.50);
   controller_nh.param("maximum_velocity_limit_scale",
-                      maximum_velocity_limit_scale_, 2.0);
-  controller_nh.param("minimum_damping_scale", minimum_damping_scale_, 0.25);
-  controller_nh.param("maximum_damping_scale", maximum_damping_scale_, 2.0);
+                      maximum_velocity_limit_scale_, 3.0);
+  controller_nh.param("minimum_damping_scale", minimum_damping_scale_, 0.05);
+  controller_nh.param("maximum_damping_scale", maximum_damping_scale_, 5.0);
+  controller_nh.param("maximum_payload_mass", maximum_payload_mass_, 5.0);
   if (!std::isfinite(gravity_scale_) || gravity_scale_ < 0.0 ||
       gravity_scale_ > 2.0 || !std::isfinite(limit_margin_) ||
       !std::isfinite(handoff_duration_) || handoff_duration_ < 0.1 ||
       handoff_duration_ > 30.0 ||
+      !std::isfinite(settle_handoff_duration_) ||
+      settle_handoff_duration_ < 0.02 || settle_handoff_duration_ > 1.0 ||
       !std::isfinite(minimum_validation_effort_) ||
       minimum_validation_effort_ < 0.0 ||
       minimum_validation_joints < 1 || minimum_validation_joints > 6 ||
@@ -230,6 +249,8 @@ bool ElfinFreedriveController::init(
       maximum_model_scale_ <= minimum_model_scale_ ||
       !std::isfinite(maximum_model_residual_) ||
       maximum_model_residual_ < 0.0 || maximum_model_residual_ > 2.0 ||
+      !std::isfinite(maximum_entry_effort_error_) ||
+      maximum_entry_effort_error_ <= 0.0 ||
       !std::isfinite(minimum_warning_alignment_) ||
       minimum_warning_alignment_ < 0.0 ||
       minimum_warning_alignment_ > minimum_model_alignment_ ||
@@ -242,6 +263,11 @@ bool ElfinFreedriveController::init(
       maximum_gravity_effort_fraction_ >= 1.0 ||
       !std::isfinite(hard_limit_margin_) || hard_limit_margin_ <= 0.0 ||
       hard_limit_margin_ >= limit_margin_ || limit_margin_ >= 0.5 ||
+      !std::isfinite(hard_limit_toward_velocity_) ||
+      hard_limit_toward_velocity_ <= 0.0 ||
+      !std::isfinite(hard_limit_inward_travel_) ||
+      hard_limit_inward_travel_ <= 0.0 ||
+      hard_limit_inward_travel_ >= hard_limit_margin_ ||
       !std::isfinite(limit_stiffness_) || limit_stiffness_ < 0.0 ||
       !std::isfinite(limit_damping_) || limit_damping_ < 0.0 ||
       !std::isfinite(velocity_limit_damping_) ||
@@ -251,7 +277,8 @@ bool ElfinFreedriveController::init(
                                 minimum_velocity_limit_scale_,
                                 maximum_velocity_limit_scale_) ||
       !math::velocityScaleValid(1.0, minimum_damping_scale_,
-                                maximum_damping_scale_)) {
+                                maximum_damping_scale_) ||
+      !std::isfinite(maximum_payload_mass_) || maximum_payload_mass_ <= 0.0) {
     ROS_ERROR("Invalid scalar safety parameter in freedrive controller config");
     return false;
   }
@@ -319,6 +346,23 @@ bool ElfinFreedriveController::init(
             initial_damping_scales.begin());
   damping_scales_.writeFromNonRT(initial_damping_scales);
 
+  double initial_payload_mass = 0.0;
+  controller_nh.param("payload_mass", initial_payload_mass, 0.0);
+  std::vector<double> initial_payload_center;
+  if (!getVectorParam(controller_nh, "payload_center_of_mass", 3,
+                      {0.0, 0.0, 0.0}, initial_payload_center)) {
+    return false;
+  }
+  payload::Model initial_payload;
+  initial_payload.mass = initial_payload_mass;
+  std::copy(initial_payload_center.begin(), initial_payload_center.end(),
+            initial_payload.center_of_mass.begin());
+  if (!payload::valid(initial_payload, maximum_payload_mass_)) {
+    ROS_ERROR("Initial payload mass/center of mass is invalid or mass is out of bounds");
+    return false;
+  }
+  payload_model_.writeFromNonRT(initial_payload);
+
   lower_limits_.assign(6, -std::numeric_limits<double>::infinity());
   upper_limits_.assign(6, std::numeric_limits<double>::infinity());
   velocity_limits_.assign(6, std::numeric_limits<double>::infinity());
@@ -364,13 +408,20 @@ bool ElfinFreedriveController::init(
   }
 
   dynamics_.reset(new KDL::ChainDynParam(chain_, gravity_vector_));
+  payload_jacobian_solver_.reset(new KDL::ChainJntToJacSolver(chain_));
+  payload_fk_solver_.reset(new KDL::ChainFkSolverPos_recursive(chain_));
   q_chain_ = KDL::JntArray(chain_.getNrOfJoints());
   gravity_torque_chain_ = KDL::JntArray(chain_.getNrOfJoints());
+  payload_jacobian_ = KDL::Jacobian(chain_.getNrOfJoints());
+  payload_effort_.fill(0.0);
   last_command_.assign(6, 0.0);
   desired_command_.assign(6, 0.0);
   initial_effort_.assign(6, 0.0);
+  entry_positions_.assign(6, 0.0);
   effective_gravity_scales_ = gravity_joint_scales_;
   gravity_command_.assign(6, 0.0);
+  settle_base_effort_.assign(6, 0.0);
+  settle_entry_command_.assign(6, 0.0);
 
   status_publisher_.reset(
       new realtime_tools::RealtimePublisher<std_msgs::UInt8>(
@@ -401,6 +452,8 @@ bool ElfinFreedriveController::init(
   damping_scales_server_ = controller_nh.advertiseService(
       "set_damping_scales", &ElfinFreedriveController::setDampingScales,
       this);
+  payload_model_server_ = controller_nh.advertiseService(
+      "set_payload_model", &ElfinFreedriveController::setPayloadModel, this);
 
   ROS_WARN_STREAM("Loaded bounded Elfin gravity controller. Torque limits are "
                   << effort_limit_scale * 100.0
@@ -415,7 +468,9 @@ void ElfinFreedriveController::starting(const ros::Time& time) {
   last_status_time_ = time;
   last_state_time_ = time;
   handoff_progress_ = 0.0;
+  settle_active_ = false;
   settle_requested_.store(false);
+  settle_started_time_ = time;
   model_alignment_ = 0.0;
   model_scale_estimate_ = 0.0;
   model_normalized_residual_ = 0.0;
@@ -434,16 +489,18 @@ void ElfinFreedriveController::starting(const ros::Time& time) {
                   std::isfinite(joint.getVelocity()) &&
                   std::isfinite(joint.getEffort());
     q_chain_(chain_index) = position;
+    entry_positions_[chain_to_joint_[chain_index]] = position;
   }
 
   if (valid_state &&
-      dynamics_->JntToGravity(q_chain_, gravity_torque_chain_) >= 0) {
+      dynamics_->JntToGravity(q_chain_, gravity_torque_chain_) >= 0 &&
+      updatePayloadEffort()) {
     std::vector<double> configured_gravity(joints_.size(), 0.0);
     for (std::size_t i = 0; i < joints_.size(); ++i) {
       configured_gravity[i] =
           gravity_scale_ * gravity_joint_scales_[i] *
               gravity_torque_chain_(joint_to_chain_[i]) +
-          gravity_bias_[i];
+          gravity_bias_[i] + payload_effort_[joint_to_chain_[i]];
       if (!math::gravityEffortHasCapacity(
               configured_gravity[i], effort_limits_[i],
               maximum_gravity_effort_fraction_)) {
@@ -456,6 +513,16 @@ void ElfinFreedriveController::starting(const ros::Time& time) {
     const math::GravityValidation validation =
         math::validateGravityObservation(configured_gravity, initial_effort_,
                                          minimum_validation_effort_);
+    const math::EffortModelError entry_error =
+        math::maximumAbsoluteEffortError(configured_gravity, initial_effort_);
+    const bool controlled_hold_validation =
+        controlled_hold_validation_.load();
+    const bool payload_hold_verified = payload_hold_verified_.load();
+    const bool entry_effort_matches =
+        !require_model_validation_ || controlled_hold_validation ||
+        payload_hold_verified ||
+        (entry_error.valid &&
+         entry_error.maximum_absolute_error <= maximum_entry_effort_error_);
     model_alignment_ = validation.alignment;
     model_scale_estimate_ = validation.scale_estimate;
     model_normalized_residual_ = validation.normalized_residual;
@@ -464,7 +531,7 @@ void ElfinFreedriveController::starting(const ros::Time& time) {
     model_direction_mismatches_ =
         static_cast<unsigned int>(validation.direction_mismatches);
     const bool strict_model_validation_passed =
-        gravity_capacity_valid_ &&
+        gravity_capacity_valid_ && entry_effort_matches &&
         (!require_model_validation_ ||
          math::gravityValidationAccepted(
              validation, minimum_validation_joints_, minimum_model_alignment_,
@@ -472,7 +539,7 @@ void ElfinFreedriveController::starting(const ros::Time& time) {
              maximum_model_residual_));
     model_validation_warning_ =
         gravity_capacity_valid_ && require_model_validation_ &&
-        !strict_model_validation_passed &&
+        entry_effort_matches && !strict_model_validation_passed &&
         allow_model_validation_warning_ && gravity_calibration_verified_ &&
         math::gravityValidationWarningAccepted(
             validation, minimum_warning_alignment_, minimum_model_scale_,
@@ -496,7 +563,7 @@ void ElfinFreedriveController::starting(const ros::Time& time) {
         const double adapted_gravity =
             gravity_scale_ * effective_gravity_scales_[i] *
                 gravity_torque_chain_(joint_to_chain_[i]) +
-            gravity_bias_[i];
+            gravity_bias_[i] + payload_effort_[joint_to_chain_[i]];
         if (!math::gravityEffortHasCapacity(
                 adapted_gravity, effort_limits_[i],
                 maximum_gravity_effort_fraction_)) {
@@ -511,7 +578,7 @@ void ElfinFreedriveController::starting(const ros::Time& time) {
       gravity_command_[i] = math::clamp(
           gravity_scale_ * effective_gravity_scales_[i] *
                   gravity_torque_chain_(joint_to_chain_[i]) +
-              gravity_bias_[i],
+              gravity_bias_[i] + payload_effort_[joint_to_chain_[i]],
           -effort_limits_[i], effort_limits_[i]);
       joints_[i].setCommand(initial_effort_[i]);
       last_command_[i] = initial_effort_[i];
@@ -529,6 +596,9 @@ void ElfinFreedriveController::starting(const ros::Time& time) {
             << ", residual=" << model_normalized_residual_
             << ", excited_joints=" << model_excited_joints_
             << ", direction_mismatches=" << model_direction_mismatches_
+            << ", max_abs_effort_error="
+            << entry_error.maximum_absolute_error << " Nm at J"
+            << entry_error.joint + 1
             << ". Holding the measured entry torque and requesting a controlled exit.");
       } else {
         ROS_ERROR_STREAM(
@@ -540,6 +610,18 @@ void ElfinFreedriveController::starting(const ros::Time& time) {
       }
       publishStatus(time, rejected_status);
       publishTelemetry(time, rejected_status);
+    } else if (controlled_hold_validation &&
+               entry_error.maximum_absolute_error >
+                   maximum_entry_effort_error_) {
+      ROS_WARN_STREAM(
+          "Freedrive entered only for the <=1 s controlled calibration hold: "
+          "the position-mode absolute effort mismatch is diagnostic ("
+          << entry_error.maximum_absolute_error << " Nm at J"
+          << entry_error.joint + 1
+          << "). Capacity and gravity direction/scale checks still passed; "
+             "the calibrator must abort on measured motion.");
+      publishStatus(time, kStatusModelWarning);
+      publishTelemetry(time, kStatusModelWarning);
     } else if (model_validation_warning_) {
       ROS_WARN_STREAM(
           "Freedrive gravity preflight entered with a calibrated-model warning: "
@@ -573,7 +655,7 @@ void ElfinFreedriveController::starting(const ros::Time& time) {
       last_command_[i] = initial_effort_[i];
     }
     command_initialized_ = true;
-  model_validation_passed_ = false;
+    model_validation_passed_ = false;
     model_validation_warning_ = false;
     gravity_capacity_valid_ = false;
     settle_requested_.store(true);
@@ -589,6 +671,7 @@ void ElfinFreedriveController::stopping(const ros::Time& time) {
   std::fill(last_command_.begin(), last_command_.end(), 0.0);
   command_initialized_ = false;
   settle_requested_.store(false);
+  settle_active_ = false;
   handoff_progress_ = 0.0;
   publishStatus(time, kStatusInactive);
   publishTelemetry(time, kStatusInactive);
@@ -714,6 +797,51 @@ bool ElfinFreedriveController::setDampingScales(
   return true;
 }
 
+bool ElfinFreedriveController::setPayloadModel(
+    SetPayloadModel::Request& request,
+    SetPayloadModel::Response& response) {
+  if (running_.load()) {
+    response.success = false;
+    response.message =
+        "payload model cannot change while freedrive is running";
+    return true;
+  }
+  payload::Model model;
+  model.mass = request.mass;
+  for (std::size_t axis = 0; axis < model.center_of_mass.size(); ++axis) {
+    model.center_of_mass[axis] = request.center_of_mass[axis];
+  }
+  if (model.mass <= 1e-9) {
+    model.mass = 0.0;
+    model.center_of_mass.fill(0.0);
+  }
+  if (!payload::valid(model, maximum_payload_mass_)) {
+    response.success = false;
+    response.message =
+        "payload mass/center of mass is invalid or mass is out of bounds";
+    return true;
+  }
+  payload_model_.writeFromNonRT(model);
+  controlled_hold_validation_.store(request.controlled_hold_validation);
+  payload_hold_verified_.store(request.hold_verified);
+  response.success = true;
+  response.message = "payload model updated while controller is stopped";
+  response.profile_file.clear();
+  return true;
+}
+
+bool ElfinFreedriveController::updatePayloadEffort() {
+  const payload::Model model = *payload_model_.readFromRT();
+  if (!payload::buildRegressor(q_chain_, gravity_vector_,
+                               *payload_jacobian_solver_, *payload_fk_solver_,
+                               payload_jacobian_, payload_regressor_)) {
+    return false;
+  }
+  payload_effort_ = payload::evaluate(payload_regressor_, model);
+  return std::all_of(payload_effort_.begin(), payload_effort_.end(),
+                     [](double effort) { return std::isfinite(effort); });
+}
+
 void ElfinFreedriveController::update(
     const ros::Time& time, const ros::Duration& period) {
   double dt = period.toSec();
@@ -734,17 +862,30 @@ void ElfinFreedriveController::update(
   }
 
   if (!valid_state ||
-      dynamics_->JntToGravity(q_chain_, gravity_torque_chain_) < 0) {
+      dynamics_->JntToGravity(q_chain_, gravity_torque_chain_) < 0 ||
+      !updatePayloadEffort()) {
     settle_requested_.store(true);
+    if (!settle_active_) {
+      settle_active_ = true;
+      settle_started_time_ = time;
+      for (std::size_t i = 0; i < joints_.size(); ++i) {
+        settle_base_effort_[i] = command_initialized_
+                                     ? last_command_[i]
+                                     : initial_effort_[i];
+        settle_entry_command_[i] = settle_base_effort_[i];
+      }
+    }
+    const double settle_elapsed =
+        std::max(0.0, (time - settle_started_time_).toSec());
     for (std::size_t i = 0; i < joints_.size(); ++i) {
       const double velocity = joints_[i].getVelocity();
-      const double base_effort = model_validation_passed_
-                                     ? gravity_command_[i]
-                                     : initial_effort_[i];
-      double command = base_effort;
+      double settling_target = settle_base_effort_[i];
       if (std::isfinite(velocity)) {
-        command -= settle_damping_[i] * velocity;
+        settling_target -= settle_damping_[i] * velocity;
       }
+      double command = math::settlingHandoffCommand(
+          settle_entry_command_[i], settling_target, settle_elapsed,
+          settle_handoff_duration_);
       command = math::clamp(command, -effort_limits_[i], effort_limits_[i]);
       command = math::rateLimit(
           command, last_command_[i], torque_rate_limits_[i], dt);
@@ -767,7 +908,7 @@ void ElfinFreedriveController::update(
     const double requested_gravity =
         gravity_scale_ * effective_gravity_scales_[i] *
             gravity_torque_chain_(joint_to_chain_[i]) +
-        gravity_bias_[i];
+        gravity_bias_[i] + payload_effort_[joint_to_chain_[i]];
     if (!math::gravityEffortHasCapacity(
             requested_gravity, effort_limits_[i],
             maximum_gravity_effort_fraction_)) {
@@ -778,14 +919,20 @@ void ElfinFreedriveController::update(
   }
 
   bool limit_active = false;
+  bool hard_limit_safety_stop = false;
+  bool velocity_safety_stop = false;
   bool safety_stop = gravity_capacity_exceeded;
-  const double velocity_limit_scale = velocity_limit_scale_.load();
+  const bool transition_protection =
+      handoff_progress_ < 1.0 || settle_requested_.load() || settle_active_;
+  const double velocity_limit_scale = math::transitionVelocityScale(
+      velocity_limit_scale_.load(), transition_protection);
   const std::array<double, 6> damping_scales = *damping_scales_.readFromRT();
   for (std::size_t i = 0; i < joints_.size(); ++i) {
     const double hard_velocity_limit = std::min(
         velocity_hard_limits_[i] * velocity_limit_scale,
         velocity_limits_[i]);
     if (std::abs(joints_[i].getVelocity()) > hard_velocity_limit) {
+      velocity_safety_stop = true;
       safety_stop = true;
     }
   }
@@ -793,22 +940,47 @@ void ElfinFreedriveController::update(
     settle_requested_.store(true);
   }
   const bool settling = settle_requested_.load();
+  if (settling && !settle_active_) {
+    settle_active_ = true;
+    settle_started_time_ = time;
+    for (std::size_t i = 0; i < joints_.size(); ++i) {
+      settle_base_effort_[i] =
+          model_validation_passed_
+              ? math::interpolate(initial_effort_[i], gravity_command_[i],
+                                  handoff_progress_)
+              : initial_effort_[i];
+      settle_entry_command_[i] = last_command_[i];
+    }
+  }
+  const double settle_elapsed =
+      settle_active_
+          ? std::max(0.0, (time - settle_started_time_).toSec())
+          : 0.0;
 
   for (std::size_t i = 0; i < joints_.size(); ++i) {
     const double position = joints_[i].getPosition();
     const double velocity = joints_[i].getVelocity();
-    const double base_effort =
-        model_validation_passed_
-            ? (settling
-                   ? gravity_command_[i]
-                   : math::interpolate(initial_effort_[i],
-                                       gravity_command_[i],
-                                       handoff_progress_))
-            : initial_effort_[i];
+    const bool hard_limit_stop = math::hardLimitStopRequired(
+        position, velocity, entry_positions_[i], lower_limits_[i],
+        upper_limits_[i], hard_limit_margin_,
+        hard_limit_toward_velocity_, hard_limit_inward_travel_);
+    const double base_effort = settling
+                                   ? settle_base_effort_[i]
+                                   : (model_validation_passed_
+                                          ? math::interpolate(
+                                                initial_effort_[i],
+                                                gravity_command_[i],
+                                                handoff_progress_)
+                                          : initial_effort_[i]);
+    const double damping = settling ? settle_damping_[i]
+                                    : damping_[i] * damping_scales[i];
+    const double damped_target = base_effort - damping * velocity;
     double command =
-        base_effort -
-        (settling ? settle_damping_[i]
-                  : damping_[i] * damping_scales[i]) * velocity;
+        settling
+            ? math::settlingHandoffCommand(
+                  settle_entry_command_[i], damped_target, settle_elapsed,
+                  settle_handoff_duration_)
+            : damped_target;
     if (!settling) {
       command -= math::smoothFriction(
           friction_[i], velocity, friction_velocity_[i]);
@@ -840,9 +1012,11 @@ void ElfinFreedriveController::update(
         command = 0.0;
       }
       limit_active = true;
-      if (position <= lower_limits_[i] + hard_limit_margin_) {
+      if (hard_limit_stop) {
         command = effort_limits_[i];
+        hard_limit_safety_stop = true;
         safety_stop = true;
+        settle_requested_.store(true);
       }
     }
     if (std::isfinite(upper_limits_[i]) &&
@@ -854,9 +1028,11 @@ void ElfinFreedriveController::update(
         command = 0.0;
       }
       limit_active = true;
-      if (position >= upper_limits_[i] - hard_limit_margin_) {
+      if (hard_limit_stop) {
         command = -effort_limits_[i];
+        hard_limit_safety_stop = true;
         safety_stop = true;
+        settle_requested_.store(true);
       }
     }
 
@@ -874,38 +1050,31 @@ void ElfinFreedriveController::update(
   }
   command_initialized_ = true;
 
+  const uint8_t control_status =
+      (!gravity_capacity_valid_ || gravity_capacity_exceeded)
+          ? kStatusGravityCapacity
+          : (!model_validation_passed_
+                 ? kStatusModelMismatch
+                 : (hard_limit_safety_stop
+                        ? kStatusHardLimit
+                        : (velocity_safety_stop
+                               ? kStatusOverspeed
+                               : (safety_stop
+                                      ? kStatusSafetyStop
+                                      : (settling
+                                             ? kStatusSettling
+                                             : (limit_active
+                                                    ? kStatusLimit
+                                                    : (model_validation_warning_
+                                                           ? kStatusModelWarning
+                                                           : kStatusActive)))))));
   if ((time - last_state_time_).toSec() >= 0.02) {
     publishCommandState(time);
-    const uint8_t telemetry_status =
-        (!gravity_capacity_valid_ || gravity_capacity_exceeded)
-            ? kStatusGravityCapacity
-            : (!model_validation_passed_
-                   ? kStatusModelMismatch
-                   : (safety_stop
-                          ? kStatusSafetyStop
-                          : (settling ? kStatusSettling
-                                      : (limit_active ? kStatusLimit
-                                                      : (model_validation_warning_
-                                                             ? kStatusModelWarning
-                                                             : kStatusActive)))));
-    publishTelemetry(time, telemetry_status);
+    publishTelemetry(time, control_status);
   }
   if (!model_validation_passed_ || safety_stop ||
       (time - last_status_time_).toSec() >= 0.1) {
-    publishStatus(time,
-                  (!gravity_capacity_valid_ || gravity_capacity_exceeded)
-                      ? kStatusGravityCapacity
-                      : (!model_validation_passed_
-                             ? kStatusModelMismatch
-                             : (safety_stop
-                                    ? kStatusSafetyStop
-                                    : (settling
-                                           ? kStatusSettling
-                                           : (limit_active
-                                                  ? kStatusLimit
-                                                  : (model_validation_warning_
-                                                         ? kStatusModelWarning
-                                                         : kStatusActive))))));
+    publishStatus(time, control_status);
   }
 }
 

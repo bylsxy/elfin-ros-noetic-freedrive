@@ -44,6 +44,10 @@ namespace elfin_basic_api {
 const double JOINT_SPEED_LIMIT_CONST=1.57; // rad per second
 const double JOINT_SPEED_DEFAULT_CONST=0.78; // rad per second
 const double CART_DURATION_DEFAULT_CONST=0.04; // second
+// Keep a Cartesian cockpit IK step from turning into a large joint jump near
+// a singularity. This bound is deliberately independent of the GUI speed
+// scaling because lower scaling increases the time between trajectory points.
+const double COCKPIT_MAXIMUM_JOINT_STEP_CONST=0.05; // rad per trajectory point
 }
 
 #endif

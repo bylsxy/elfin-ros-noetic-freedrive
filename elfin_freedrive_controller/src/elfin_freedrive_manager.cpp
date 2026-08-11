@@ -1,7 +1,13 @@
 #include <elfin_freedrive_controller/elfin_freedrive_controller.h>
+#include <elfin_freedrive_controller/DeleteRecordedPoint.h>
+#include <elfin_freedrive_controller/EvaluatePayloadModel.h>
 #include <elfin_freedrive_controller/FreedriveTelemetry.h>
+#include <elfin_freedrive_controller/GetPayloadModel.h>
+#include <elfin_freedrive_controller/ListRecordedPoints.h>
 #include <elfin_freedrive_controller/SetDampingScales.h>
+#include <elfin_freedrive_controller/SetPayloadModel.h>
 #include <elfin_freedrive_controller/freedrive_math.h>
+#include <elfin_freedrive_controller/payload_model.h>
 #include <elfin_freedrive_controller/tool_button_logic.h>
 
 #include <controller_manager_msgs/ListControllers.h>
@@ -24,11 +30,15 @@
 #include <std_srvs/SetBool.h>
 #include <std_srvs/Trigger.h>
 #include <urdf/model.h>
+#include <yaml-cpp/yaml.h>
 
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <cstring>
 #include <cstdlib>
 #include <cstdint>
 #include <deque>
@@ -51,6 +61,12 @@ bool finite(double value) {
   return std::isfinite(value);
 }
 
+double steadySeconds() {
+  return std::chrono::duration<double>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
+
 std::string defaultRosDataPath(const std::string& filename) {
   const char* ros_home = std::getenv("ROS_HOME");
   if (ros_home != nullptr && ros_home[0] != '\0') {
@@ -62,6 +78,74 @@ std::string defaultRosDataPath(const std::string& filename) {
   }
   return std::string("/tmp/") + filename;
 }
+
+std::string trimAsciiWhitespace(const std::string& value) {
+  const std::size_t first = value.find_first_not_of(" \t\r");
+  if (first == std::string::npos) {
+    return std::string();
+  }
+  const std::size_t last = value.find_last_not_of(" \t\r");
+  return value.substr(first, last - first + 1);
+}
+
+bool removeLegacyPointNullPadding(const std::string& input,
+                                  std::string& normalized) {
+  normalized.clear();
+  std::size_t cursor = 0;
+  bool removed = false;
+  while (cursor < input.size()) {
+    const std::size_t null_begin = input.find('\0', cursor);
+    if (null_begin == std::string::npos) {
+      normalized.append(input, cursor, std::string::npos);
+      break;
+    }
+    std::size_t null_end = null_begin;
+    while (null_end < input.size() && input[null_end] == '\0') {
+      ++null_end;
+    }
+    const bool starts_at_line_boundary =
+        null_begin == 0 || input[null_begin - 1] == '\n';
+    const bool precedes_point_record =
+        input.compare(null_end, 8, "- index:") == 0;
+    if (!starts_at_line_boundary || !precedes_point_record) {
+      normalized.clear();
+      return false;
+    }
+    normalized.append(input, cursor, null_begin - cursor);
+    cursor = null_end;
+    removed = true;
+  }
+  return removed;
+}
+
+bool normalizeLegacyPointYaml(const std::string& input,
+                              std::string& normalized) {
+  std::string without_nulls;
+  const bool removed_nulls =
+      removeLegacyPointNullPadding(input, without_nulls);
+  const std::string& source = removed_nulls ? without_nulls : input;
+  std::istringstream lines(source);
+  std::ostringstream output;
+  std::string line;
+  bool removed_empty_root = false;
+  bool saw_point_record = false;
+  while (std::getline(lines, line)) {
+    const std::string trimmed = trimAsciiWhitespace(line);
+    if (!removed_empty_root && !saw_point_record && trimmed == "[]") {
+      removed_empty_root = true;
+      continue;
+    }
+    if (trimmed.compare(0, 8, "- index:") == 0) {
+      saw_point_record = true;
+    }
+    output << line << "\n";
+  }
+  if (removed_empty_root && !saw_point_record) {
+    return false;
+  }
+  normalized = output.str();
+  return removed_nulls || removed_empty_root;
+}
 }  // namespace
 
 class ElfinFreedriveManager {
@@ -71,13 +155,14 @@ public:
         simulation_(false),
         allow_hardware_freedrive_(false),
         poll_tool_buttons_(true),
+        free_press_hold_seconds_(ToolButtonLogic::defaultFreePressSeconds()),
         joint_state_timeout_(0.35),
         driver_state_timeout_(0.75),
         controller_status_timeout_(1.0),
         entry_velocity_limit_(0.02),
         velocity_limit_scale_(1.0),
         minimum_velocity_limit_scale_(0.50),
-        maximum_velocity_limit_scale_(2.0),
+        maximum_velocity_limit_scale_(3.0),
         exit_velocity_limit_(0.003),
         exit_settle_timeout_(8.0),
         protective_exit_settle_timeout_(1.0),
@@ -88,10 +173,11 @@ public:
         preflight_velocity_limit_(0.003),
         preflight_position_tolerance_(0.003),
         preflight_max_effort_stddev_(2.0),
+        preflight_max_model_error_(5.0),
         allow_model_validation_warning_(true),
         minimum_warning_alignment_(0.50),
-        minimum_damping_scale_(0.25),
-        maximum_damping_scale_(2.0),
+        minimum_damping_scale_(0.05),
+        maximum_damping_scale_(5.0),
         calibration_min_samples_(6),
         calibration_min_paired_poses_(5),
         calibration_min_pose_separation_(0.08),
@@ -105,6 +191,15 @@ public:
         calibration_max_absolute_residual_(5.0),
         gravity_model_ready_(false),
         gravity_calibration_verified_(false),
+        maximum_payload_mass_(5.0),
+        payload_fit_rmse_(0.0),
+        payload_fit_max_error_(0.0),
+        payload_validation_drift_(0.0),
+        payload_sample_count_(0),
+        payload_model_synchronized_(false),
+        controlled_hold_validation_(false),
+        payload_hold_verified_(false),
+        incident_lockout_latched_(false),
         model_maximum_gravity_effort_fraction_(0.90),
         model_adaptive_entry_scale_(false),
         model_minimum_adaptive_scale_(0.75),
@@ -123,6 +218,8 @@ public:
         exit_protective_(false),
         transition_busy_(false),
         position_recovery_pending_(false),
+        physical_free_entry_pending_(false),
+        last_physical_free_entry_attempt_seconds_(0.0),
         idle_initialized_(false),
         stable_exit_samples_(0),
         trial_log_rows_(0),
@@ -142,6 +239,8 @@ public:
     private_nh_.param("allow_hardware_freedrive",
                       allow_hardware_freedrive_, false);
     private_nh_.param("poll_tool_buttons", poll_tool_buttons_, true);
+    private_nh_.param("free_press_hold_seconds", free_press_hold_seconds_,
+                      ToolButtonLogic::defaultFreePressSeconds());
     private_nh_.param("joint_state_timeout", joint_state_timeout_, 0.35);
     private_nh_.param("driver_state_timeout", driver_state_timeout_, 0.75);
     private_nh_.param("controller_status_timeout",
@@ -151,7 +250,7 @@ public:
     private_nh_.param("minimum_velocity_limit_scale",
                       minimum_velocity_limit_scale_, 0.50);
     private_nh_.param("maximum_velocity_limit_scale",
-                      maximum_velocity_limit_scale_, 2.0);
+                      maximum_velocity_limit_scale_, 3.0);
     private_nh_.param("exit_velocity_limit", exit_velocity_limit_, 0.003);
     private_nh_.param("exit_settle_timeout", exit_settle_timeout_, 8.0);
     private_nh_.param("protective_exit_settle_timeout",
@@ -169,12 +268,14 @@ public:
                       preflight_position_tolerance_, 0.003);
     private_nh_.param("preflight_max_effort_stddev",
                       preflight_max_effort_stddev_, 2.0);
+    private_nh_.param("preflight_max_model_error",
+                      preflight_max_model_error_, 5.0);
     private_nh_.param("allow_model_validation_warning",
                       allow_model_validation_warning_, true);
     private_nh_.param("minimum_warning_alignment",
                       minimum_warning_alignment_, 0.50);
-    private_nh_.param("minimum_damping_scale", minimum_damping_scale_, 0.25);
-    private_nh_.param("maximum_damping_scale", maximum_damping_scale_, 2.0);
+    private_nh_.param("minimum_damping_scale", minimum_damping_scale_, 0.05);
+    private_nh_.param("maximum_damping_scale", maximum_damping_scale_, 5.0);
     private_nh_.param<std::string>("position_controller",
                                    position_controller_,
                                    "elfin_arm_controller");
@@ -193,6 +294,13 @@ public:
     private_nh_.param<std::string>(
         "gravity_calibration_candidate_file", calibration_candidate_file_,
         defaultRosDataPath("elfin_freedrive_gravity_candidate.yaml"));
+    private_nh_.param<std::string>(
+        "payload_profile_file", payload_profile_file_,
+        defaultRosDataPath("elfin_freedrive_payload.yaml"));
+    private_nh_.param<std::string>(
+        "freedrive_lockout_file", freedrive_lockout_file_,
+        defaultRosDataPath("ELFIN_FREEDRIVE_LOCKOUT"));
+    private_nh_.param("maximum_payload_mass", maximum_payload_mass_, 5.0);
     int calibration_min_samples = 6;
     private_nh_.param("calibration_min_samples", calibration_min_samples, 6);
     calibration_min_samples_ = static_cast<unsigned int>(
@@ -223,9 +331,12 @@ public:
     private_nh_.getParam("damping_scales", damping_scales_);
     preflight_min_samples_ =
         static_cast<unsigned int>(std::max(1, preflight_min_samples));
+    button_logic_ = ToolButtonLogic(free_press_hold_seconds_);
     validateParameters();
     initializeGravityModel();
+    loadPayloadProfile();
     loadGravityCalibrationSamples();
+    refreshIncidentLockout();
     point_count_ = countExistingPoints();
 
     switch_client_ = root_nh_.serviceClient<
@@ -248,6 +359,8 @@ public:
         "/elfin_freedrive_controller/set_velocity_limit_scale");
     damping_scales_client_ = root_nh_.serviceClient<SetDampingScales>(
         "/elfin_freedrive_controller/set_damping_scales");
+    payload_model_client_ = root_nh_.serviceClient<SetPayloadModel>(
+        "/elfin_freedrive_controller/set_payload_model");
 
     joint_state_sub_ = root_nh_.subscribe(
         "/joint_states", 5, &ElfinFreedriveManager::jointStateCallback, this);
@@ -293,11 +406,22 @@ public:
     damping_scales_pub_ =
         private_nh_.advertise<std_msgs::Float64MultiArray>(
             "damping_scales", 1, true);
+    payload_profile_pub_ =
+        private_nh_.advertise<std_msgs::String>("payload_profile", 1, true);
+    payload_model_pub_ =
+        private_nh_.advertise<std_msgs::Float64MultiArray>(
+            "payload_model", 1, true);
 
     set_freedrive_server_ = private_nh_.advertiseService(
         "set_freedrive", &ElfinFreedriveManager::setFreedriveCallback, this);
     record_point_server_ = private_nh_.advertiseService(
         "record_point", &ElfinFreedriveManager::recordPointCallback, this);
+    list_recorded_points_server_ = private_nh_.advertiseService(
+        "list_recorded_points",
+        &ElfinFreedriveManager::listRecordedPointsCallback, this);
+    delete_recorded_point_server_ = private_nh_.advertiseService(
+        "delete_recorded_point",
+        &ElfinFreedriveManager::deleteRecordedPointCallback, this);
     record_gravity_sample_server_ = private_nh_.advertiseService(
         "record_gravity_sample",
         &ElfinFreedriveManager::recordGravitySampleCallback, this);
@@ -310,6 +434,15 @@ public:
     set_damping_scales_server_ = private_nh_.advertiseService(
         "set_damping_scales",
         &ElfinFreedriveManager::setDampingScalesCallback, this);
+    set_payload_model_server_ = private_nh_.advertiseService(
+        "set_payload_model", &ElfinFreedriveManager::setPayloadModelCallback,
+        this);
+    get_payload_model_server_ = private_nh_.advertiseService(
+        "get_payload_model", &ElfinFreedriveManager::getPayloadModelCallback,
+        this);
+    evaluate_payload_model_server_ = private_nh_.advertiseService(
+        "evaluate_payload_model",
+        &ElfinFreedriveManager::evaluatePayloadModelCallback, this);
 
     button_timer_ = root_nh_.createWallTimer(
         ros::WallDuration(0.10),
@@ -327,12 +460,22 @@ public:
     publishPointCount();
     publishVelocityLimits();
     publishDampingScales();
+    publishPayloadModel();
+    synchronizePayloadModel();
     publishState();
     ROS_WARN_STREAM(
         "Elfin freedrive manager started. Physical FREE is DI bit 5 and "
-        "POINT is DI bit 4. Hardware torque mode is "
-        << ((simulation_ || allow_hardware_freedrive_) ? "UNLOCKED"
-                                                       : "LOCKED"));
+        "POINT is DI bit 4. FREE requires at least "
+        << std::fixed << std::setprecision(2)
+        << button_logic_.requiredFreePressSeconds() << " s and "
+        << button_logic_.requiredFreePressSamples()
+        << " high samples; isolated low gaps up to "
+        << button_logic_.maximumFreeLowGapSeconds()
+        << " s are filtered. Hardware torque mode is "
+        << ((simulation_ ||
+             (allow_hardware_freedrive_ && !incident_lockout_latched_))
+                ? "UNLOCKED"
+                : "LOCKED"));
   }
 
 private:
@@ -361,6 +504,9 @@ private:
     if (expected_joint_names_.size() != kJointCount ||
         velocity_hard_limits_.size() != kJointCount ||
         damping_scales_.size() != kJointCount ||
+        !finite(free_press_hold_seconds_) ||
+        free_press_hold_seconds_ < ToolButtonLogic::minimumFreePressSeconds() ||
+        free_press_hold_seconds_ > 10.0 ||
         !finite(joint_state_timeout_) || joint_state_timeout_ <= 0.0 ||
         !finite(driver_state_timeout_) || driver_state_timeout_ <= 0.0 ||
         !finite(controller_status_timeout_) ||
@@ -386,6 +532,8 @@ private:
         preflight_position_tolerance_ <= 0.0 ||
         !finite(preflight_max_effort_stddev_) ||
         preflight_max_effort_stddev_ <= 0.0 ||
+        !finite(preflight_max_model_error_) ||
+        preflight_max_model_error_ <= 0.0 ||
         !finite(minimum_warning_alignment_) ||
         minimum_warning_alignment_ < 0.0 ||
         minimum_warning_alignment_ > 1.0 ||
@@ -411,8 +559,10 @@ private:
         calibration_max_normalized_residual_ < 0.0 ||
         !finite(calibration_max_absolute_residual_) ||
         calibration_max_absolute_residual_ <= 0.0 ||
+        !finite(maximum_payload_mass_) || maximum_payload_mass_ <= 0.0 ||
         calibration_samples_file_.empty() ||
-        calibration_candidate_file_.empty()) {
+        calibration_candidate_file_.empty() || payload_profile_file_.empty() ||
+        freedrive_lockout_file_.empty()) {
       ROS_FATAL("Invalid elfin_freedrive_manager parameter set");
       throw std::runtime_error("invalid freedrive manager parameters");
     }
@@ -429,6 +579,33 @@ private:
         throw std::runtime_error("invalid damping scales");
       }
     }
+  }
+
+  bool lockoutFilePresent() const {
+    struct stat file_info;
+    return !simulation_ &&
+           stat(freedrive_lockout_file_.c_str(), &file_info) == 0;
+  }
+
+  bool refreshIncidentLockout() {
+    if (lockoutFilePresent()) {
+      incident_lockout_latched_ = true;
+    }
+    return incident_lockout_latched_;
+  }
+
+  std::string incidentLockoutDetail() const {
+    std::ifstream input(freedrive_lockout_file_);
+    std::string first_line;
+    std::getline(input, first_line);
+    std::string detail =
+        "真机 FREE 已因 2026-07-26 下坠事故锁定；仅允许位置模式";
+    if (!first_line.empty()) {
+      detail += "（" + first_line + "）";
+    }
+    detail += "。修复、离线测试和监督复验完成前不得删除 " +
+              freedrive_lockout_file_;
+    return detail;
   }
 
   void initializeGravityModel() {
@@ -585,9 +762,414 @@ private:
 
     gravity_q_ = KDL::JntArray(gravity_chain_.getNrOfJoints());
     gravity_effort_ = KDL::JntArray(gravity_chain_.getNrOfJoints());
-    gravity_dynamics_.reset(new KDL::ChainDynParam(
-        gravity_chain_, KDL::Vector(gravity[0], gravity[1], gravity[2])));
+    gravity_vector_ = KDL::Vector(gravity[0], gravity[1], gravity[2]);
+    gravity_dynamics_.reset(
+        new KDL::ChainDynParam(gravity_chain_, gravity_vector_));
+    payload_jacobian_solver_.reset(
+        new KDL::ChainJntToJacSolver(gravity_chain_));
+    payload_fk_solver_.reset(
+        new KDL::ChainFkSolverPos_recursive(gravity_chain_));
+    payload_jacobian_ = KDL::Jacobian(gravity_chain_.getNrOfJoints());
+    current_payload_effort_.fill(0.0);
     gravity_model_ready_ = true;
+  }
+
+  std::string payloadSummary() const {
+    std::ostringstream summary;
+    summary << payload_profile_name_ << "；质量=" << std::fixed
+            << std::setprecision(3) << payload_model_.mass << " kg，重心=["
+            << payload_model_.center_of_mass[0] << ", "
+            << payload_model_.center_of_mass[1] << ", "
+            << payload_model_.center_of_mass[2] << "] m；拟合 RMSE="
+            << payload_fit_rmse_ << " Nm，留出最大误差="
+            << payload_fit_max_error_ << " Nm，保持漂移="
+            << payload_validation_drift_ << " rad；样本="
+            << payload_sample_count_ << "；保持验证="
+            << (payload_hold_verified_ ? "通过" : "未通过")
+            << "；控制器同步="
+            << (payload_model_synchronized_ ? "是" : "否")
+            << "；文件=" << payload_profile_file_;
+    return summary.str();
+  }
+
+  void loadPayloadProfile() {
+    payload_model_ = payload::Model();
+    payload_profile_name_ = "empty-base";
+    payload_fit_rmse_ = 0.0;
+    payload_fit_max_error_ = 0.0;
+    payload_validation_drift_ = 0.0;
+    payload_sample_count_ = 0;
+    payload_hold_verified_ = false;
+
+    std::ifstream input(payload_profile_file_);
+    if (!input) {
+      ROS_WARN_STREAM("No persisted payload profile at "
+                      << payload_profile_file_
+                      << "; using the calibrated empty-arm base model");
+      return;
+    }
+    try {
+      const YAML::Node profile = YAML::Load(input);
+      if (!profile || !profile.IsMap() || !profile["schema_version"] ||
+          profile["schema_version"].as<int>() != 1 ||
+          !profile["profile_name"] || !profile["mass_kg"] ||
+          !profile["center_of_mass_m"] ||
+          !profile["center_of_mass_m"].IsSequence() ||
+          profile["center_of_mass_m"].size() != 3) {
+        throw std::runtime_error("missing or incompatible payload profile fields");
+      }
+      payload::Model loaded;
+      loaded.mass = profile["mass_kg"].as<double>();
+      for (std::size_t axis = 0; axis < loaded.center_of_mass.size(); ++axis) {
+        loaded.center_of_mass[axis] =
+            profile["center_of_mass_m"][axis].as<double>();
+      }
+      if (loaded.mass <= 1e-9) {
+        loaded.mass = 0.0;
+        loaded.center_of_mass.fill(0.0);
+      }
+      if (!payload::valid(loaded, maximum_payload_mass_)) {
+        throw std::runtime_error(
+            "payload mass/center is invalid or mass is out of bounds");
+      }
+      payload_model_ = loaded;
+      payload_profile_name_ = profile["profile_name"].as<std::string>();
+      payload_fit_rmse_ =
+          profile["fit_rmse_nm"] ? profile["fit_rmse_nm"].as<double>() : 0.0;
+      payload_fit_max_error_ = profile["fit_max_error_nm"]
+                                   ? profile["fit_max_error_nm"].as<double>()
+                                   : 0.0;
+      payload_validation_drift_ =
+          profile["validation_drift_rad"]
+              ? profile["validation_drift_rad"].as<double>()
+              : 0.0;
+      payload_sample_count_ =
+          profile["sample_count"]
+              ? profile["sample_count"].as<std::uint32_t>()
+              : 0;
+      payload_hold_verified_ =
+          profile["hold_verified"]
+              ? profile["hold_verified"].as<bool>()
+              : false;
+      if (payload_profile_name_.empty() || !finite(payload_fit_rmse_) ||
+          payload_fit_rmse_ < 0.0 || !finite(payload_fit_max_error_) ||
+          payload_fit_max_error_ < 0.0 ||
+          !finite(payload_validation_drift_) ||
+          payload_validation_drift_ < 0.0) {
+        throw std::runtime_error("payload profile metadata is invalid");
+      }
+      ROS_WARN_STREAM("Loaded persisted payload profile: " << payloadSummary());
+    } catch (const std::exception& error) {
+      payload_model_ = payload::Model();
+      payload_profile_name_ = "empty-base";
+      payload_fit_rmse_ = 0.0;
+      payload_fit_max_error_ = 0.0;
+      payload_validation_drift_ = 0.0;
+      payload_sample_count_ = 0;
+      payload_hold_verified_ = false;
+      ROS_ERROR_STREAM("Ignoring invalid payload profile "
+                       << payload_profile_file_ << ": " << error.what());
+    }
+  }
+
+  bool writePayloadProfile(std::string& error) const {
+    YAML::Emitter emitter;
+    emitter.SetDoublePrecision(17);
+    emitter << YAML::BeginMap;
+    emitter << YAML::Key << "schema_version" << YAML::Value << 1;
+    emitter << YAML::Key << "profile_name" << YAML::Value
+            << payload_profile_name_;
+    emitter << YAML::Key << "created_wall_time" << YAML::Value
+            << ros::WallTime::now().toSec();
+    emitter << YAML::Key << "mass_kg" << YAML::Value << payload_model_.mass;
+    emitter << YAML::Key << "center_of_mass_m" << YAML::Value
+            << YAML::Flow << YAML::BeginSeq
+            << payload_model_.center_of_mass[0]
+            << payload_model_.center_of_mass[1]
+            << payload_model_.center_of_mass[2] << YAML::EndSeq;
+    emitter << YAML::Key << "fit_rmse_nm" << YAML::Value
+            << payload_fit_rmse_;
+    emitter << YAML::Key << "fit_max_error_nm" << YAML::Value
+            << payload_fit_max_error_;
+    emitter << YAML::Key << "validation_drift_rad" << YAML::Value
+            << payload_validation_drift_;
+    emitter << YAML::Key << "sample_count" << YAML::Value
+            << payload_sample_count_;
+    emitter << YAML::Key << "hold_verified" << YAML::Value
+            << payload_hold_verified_;
+    emitter << YAML::EndMap;
+    if (!emitter.good()) {
+      error = "无法生成末端负载 YAML：" + emitter.GetLastError();
+      return false;
+    }
+
+    const std::string temporary = payload_profile_file_ + ".tmp";
+    std::ofstream output(temporary, std::ios::out | std::ios::trunc);
+    if (!output) {
+      error = "无法创建末端负载临时文件：" + temporary;
+      return false;
+    }
+    output << "# Elfin E05 active rigid payload profile.\n";
+    output << emitter.c_str() << "\n";
+    output.flush();
+    if (!output) {
+      output.close();
+      std::remove(temporary.c_str());
+      error = "写入末端负载临时文件失败";
+      return false;
+    }
+    output.close();
+    if (std::rename(temporary.c_str(), payload_profile_file_.c_str()) != 0) {
+      const int rename_error = errno;
+      std::remove(temporary.c_str());
+      error = "无法原子替换末端负载文件：" +
+              std::string(std::strerror(rename_error));
+      return false;
+    }
+    return true;
+  }
+
+  bool applyPayloadToController(const payload::Model& model,
+                                const std::string& profile_name,
+                                double fit_rmse,
+                                double fit_max_error,
+                                double validation_drift,
+                                std::uint32_t sample_count,
+                                bool controlled_hold_validation,
+                                bool hold_verified,
+                                std::string& error) {
+    if (!payload_model_client_.exists()) {
+      error = "零力控制器的末端负载服务尚未上线";
+      return false;
+    }
+    SetPayloadModel service;
+    service.request.profile_name = profile_name;
+    service.request.mass = model.mass;
+    for (std::size_t axis = 0; axis < model.center_of_mass.size(); ++axis) {
+      service.request.center_of_mass[axis] = model.center_of_mass[axis];
+    }
+    service.request.fit_rmse = fit_rmse;
+    service.request.fit_max_error = fit_max_error;
+    service.request.validation_drift = validation_drift;
+    service.request.sample_count = sample_count;
+    service.request.persist = false;
+    service.request.controlled_hold_validation = controlled_hold_validation;
+    service.request.hold_verified = hold_verified;
+    if (!payload_model_client_.call(service)) {
+      error = "调用零力控制器末端负载服务失败";
+      return false;
+    }
+    if (!service.response.success) {
+      error = "零力控制器拒绝末端负载：" + service.response.message;
+      return false;
+    }
+    return true;
+  }
+
+  bool synchronizePayloadModel() {
+    if (freedrive_active_ || transition_busy_) {
+      return false;
+    }
+    std::string error;
+    if (!applyPayloadToController(
+            payload_model_, payload_profile_name_, payload_fit_rmse_,
+            payload_fit_max_error_, payload_validation_drift_,
+            payload_sample_count_, false, payload_hold_verified_, error)) {
+      payload_model_synchronized_ = false;
+      return false;
+    }
+    payload_model_synchronized_ = true;
+    root_nh_.setParam("/elfin_freedrive_controller/payload_mass",
+                      payload_model_.mass);
+    root_nh_.setParam(
+        "/elfin_freedrive_controller/payload_center_of_mass",
+        std::vector<double>(payload_model_.center_of_mass.begin(),
+                            payload_model_.center_of_mass.end()));
+    publishPayloadModel();
+    return true;
+  }
+
+  void publishPayloadModel() {
+    std_msgs::String profile;
+    profile.data = payloadSummary();
+    payload_profile_pub_.publish(profile);
+    std_msgs::Float64MultiArray values;
+    values.data = {payload_model_.mass,
+                   payload_model_.center_of_mass[0],
+                   payload_model_.center_of_mass[1],
+                   payload_model_.center_of_mass[2],
+                   payload_fit_rmse_, payload_fit_max_error_,
+                   payload_validation_drift_};
+    payload_model_pub_.publish(values);
+  }
+
+  bool getPayloadModelCallback(GetPayloadModel::Request& request,
+                               GetPayloadModel::Response& response) {
+    (void)request;
+    response.success = true;
+    response.message = payloadSummary();
+    response.profile_name = payload_profile_name_;
+    response.mass = payload_model_.mass;
+    for (std::size_t axis = 0; axis < payload_model_.center_of_mass.size();
+         ++axis) {
+      response.center_of_mass[axis] = payload_model_.center_of_mass[axis];
+    }
+    response.fit_rmse = payload_fit_rmse_;
+    response.fit_max_error = payload_fit_max_error_;
+    response.validation_drift = payload_validation_drift_;
+    response.sample_count = payload_sample_count_;
+    response.hold_verified = payload_hold_verified_;
+    response.synchronized = payload_model_synchronized_;
+    response.profile_file = payload_profile_file_;
+    return true;
+  }
+
+  bool setPayloadModelCallback(SetPayloadModel::Request& request,
+                               SetPayloadModel::Response& response) {
+    response.profile_file = payload_profile_file_;
+    if (freedrive_active_ || transition_busy_ || exit_requested_ ||
+        position_recovery_pending_) {
+      response.success = false;
+      response.message = "正在拖拽或切换控制器，不能更换末端负载模型";
+      return true;
+    }
+    payload::Model candidate;
+    candidate.mass = request.mass;
+    for (std::size_t axis = 0; axis < candidate.center_of_mass.size(); ++axis) {
+      candidate.center_of_mass[axis] = request.center_of_mass[axis];
+    }
+    if (candidate.mass <= 1e-9) {
+      candidate.mass = 0.0;
+      candidate.center_of_mass.fill(0.0);
+    }
+    if (request.profile_name.empty() ||
+        (request.persist && request.controlled_hold_validation) ||
+        (request.controlled_hold_validation && request.hold_verified) ||
+        !payload::valid(candidate, maximum_payload_mass_) ||
+        !finite(request.fit_rmse) || request.fit_rmse < 0.0 ||
+        !finite(request.fit_max_error) || request.fit_max_error < 0.0 ||
+        !finite(request.validation_drift) || request.validation_drift < 0.0) {
+      response.success = false;
+      response.message = "末端负载参数、拟合指标或配置名称无效";
+      return true;
+    }
+
+    std::string error;
+    if (!applyPayloadToController(
+            candidate, request.profile_name, request.fit_rmse,
+            request.fit_max_error, request.validation_drift,
+            request.sample_count, request.controlled_hold_validation,
+            request.hold_verified, error)) {
+      payload_model_synchronized_ = false;
+      response.success = false;
+      response.message = error;
+      publishPayloadModel();
+      return true;
+    }
+
+    const payload::Model previous_model = payload_model_;
+    const std::string previous_name = payload_profile_name_;
+    const double previous_rmse = payload_fit_rmse_;
+    const double previous_max_error = payload_fit_max_error_;
+    const double previous_drift = payload_validation_drift_;
+    const std::uint32_t previous_samples = payload_sample_count_;
+    const bool previous_hold_verified = payload_hold_verified_;
+    payload_model_ = candidate;
+    payload_profile_name_ = request.profile_name;
+    payload_fit_rmse_ = request.fit_rmse;
+    payload_fit_max_error_ = request.fit_max_error;
+    payload_validation_drift_ = request.validation_drift;
+    payload_sample_count_ = request.sample_count;
+    payload_hold_verified_ = request.hold_verified;
+    payload_model_synchronized_ = true;
+    controlled_hold_validation_ = request.controlled_hold_validation;
+
+    if (request.persist && !writePayloadProfile(error)) {
+      const std::string persistence_error = error;
+      payload_model_ = previous_model;
+      payload_profile_name_ = previous_name;
+      payload_fit_rmse_ = previous_rmse;
+      payload_fit_max_error_ = previous_max_error;
+      payload_validation_drift_ = previous_drift;
+      payload_sample_count_ = previous_samples;
+      payload_hold_verified_ = previous_hold_verified;
+      std::string rollback_error;
+      payload_model_synchronized_ = applyPayloadToController(
+          previous_model, previous_name, previous_rmse, previous_max_error,
+          previous_drift, previous_samples, false, previous_hold_verified,
+          rollback_error);
+      controlled_hold_validation_ = false;
+      response.success = false;
+      response.message = "持久化失败：" + persistence_error;
+      if (payload_model_synchronized_) {
+        response.message += "；控制器已回滚原负载模型";
+      } else {
+        response.message += "；控制器回滚也失败：" + rollback_error +
+                            "。FREE 已锁定，请保持位置模式并重启控制栈";
+      }
+      publishPayloadModel();
+      return true;
+    }
+
+    root_nh_.setParam("/elfin_freedrive_controller/payload_mass",
+                      payload_model_.mass);
+    root_nh_.setParam(
+        "/elfin_freedrive_controller/payload_center_of_mass",
+        std::vector<double>(payload_model_.center_of_mass.begin(),
+                            payload_model_.center_of_mass.end()));
+    preflight_samples_.clear();
+    publishPayloadModel();
+    response.success = true;
+    response.message =
+        std::string(request.persist ? "已验证并持久启用：" : "已暂存候选：") +
+        payloadSummary();
+    return true;
+  }
+
+  bool evaluatePayloadModelCallback(
+      EvaluatePayloadModel::Request& request,
+      EvaluatePayloadModel::Response& response) {
+    if (!gravity_model_ready_) {
+      response.success = false;
+      response.message = gravity_model_error_;
+      return true;
+    }
+    for (std::size_t joint = 0; joint < kJointCount; ++joint) {
+      if (!finite(request.joint_positions[joint])) {
+        response.success = false;
+        response.message = "请求包含非有限关节角";
+        return true;
+      }
+      gravity_q_(gravity_joint_to_chain_[joint]) =
+          request.joint_positions[joint];
+    }
+    if (gravity_dynamics_->JntToGravity(gravity_q_, gravity_effort_) < 0 ||
+        !payload::buildRegressor(
+            gravity_q_, gravity_vector_, *payload_jacobian_solver_,
+            *payload_fk_solver_, payload_jacobian_, payload_regressor_)) {
+      response.success = false;
+      response.message = "KDL 无法计算该姿态的基础重力或末端回归矩阵";
+      return true;
+    }
+    for (std::size_t joint = 0; joint < kJointCount; ++joint) {
+      const std::size_t chain_joint = gravity_joint_to_chain_[joint];
+      response.base_effort[joint] =
+          model_gravity_scale_ * gravity_joint_scales_[joint] *
+              gravity_effort_(chain_joint) +
+          gravity_bias_[joint];
+      response.effort_limits[joint] = model_effort_limits_[joint];
+      for (std::size_t parameter = 0;
+           parameter < payload::kParameterCount; ++parameter) {
+        response.payload_regressor[
+            joint * payload::kParameterCount + parameter] =
+            payload_regressor_[chain_joint][parameter];
+      }
+    }
+    response.maximum_gravity_effort_fraction =
+        model_maximum_gravity_effort_fraction_;
+    response.success = true;
+    response.message = "已计算空臂基础重力和未知末端线性回归矩阵";
+    return true;
   }
 
   void updatePreflightSamples() {
@@ -669,6 +1251,14 @@ private:
       detail = "未通过：KDL 无法计算当前位置的重力力矩";
       return false;
     }
+    if (!payload::buildRegressor(
+            gravity_q_, gravity_vector_, *payload_jacobian_solver_,
+            *payload_fk_solver_, payload_jacobian_, payload_regressor_)) {
+      detail = "未通过：KDL 无法计算未知末端负载回归矩阵";
+      return false;
+    }
+    current_payload_effort_ = payload::evaluate(payload_regressor_,
+                                                payload_model_);
 
     for (std::size_t joint = 0; joint < kJointCount; ++joint) {
       observation.base_model_effort[joint] =
@@ -690,7 +1280,8 @@ private:
                                std::size_t joint) const {
     return gravity_joint_scales_[joint] *
                observation.base_model_effort[joint] +
-           gravity_bias_[joint];
+           gravity_bias_[joint] +
+           current_payload_effort_[gravity_joint_to_chain_[joint]];
   }
 
   bool evaluateGravityPreflight(std::string& detail,
@@ -717,6 +1308,14 @@ private:
         math::validateGravityObservation(
             model_effort, measured_effort,
             model_minimum_validation_effort_);
+    const math::EffortModelError model_error =
+        math::maximumAbsoluteEffortError(model_effort, measured_effort);
+    const bool absolute_model_error_valid =
+        model_error.valid &&
+        model_error.maximum_absolute_error <= preflight_max_model_error_;
+    const bool model_error_allows_entry =
+        absolute_model_error_valid || controlled_hold_validation_ ||
+        payload_hold_verified_;
 
     double adaptive_scale = 1.0;
     if (model_adaptive_entry_scale_ && validation.sufficient_excitation) {
@@ -733,7 +1332,8 @@ private:
       const double adapted_gravity =
           adaptive_scale * gravity_joint_scales_[joint] *
               observation.base_model_effort[joint] +
-          gravity_bias_[joint];
+          gravity_bias_[joint] +
+          current_payload_effort_[gravity_joint_to_chain_[joint]];
       const double available = model_effort_limits_[joint] *
                                model_maximum_gravity_effort_fraction_;
       const double ratio = std::abs(adapted_gravity) / available;
@@ -760,16 +1360,26 @@ private:
           maximum_effort_stddev, observation.effort_stddev[joint]);
     }
 
-    const bool strictly_accepted = math::gravityValidationAccepted(
-        validation, model_minimum_validation_joints_,
-        model_minimum_alignment_, model_minimum_scale_,
-        model_maximum_scale_, model_maximum_residual_) &&
+    // A payload profile that already survived the real hold test does not
+    // need a well-excited pose on every later FREE entry. Keep the static
+    // stability and actuator-capacity checks below. Candidate calibration
+    // profiles still have to pass the model-direction checks before their
+    // first controlled hold test.
+    const bool hold_validation_valid = payload_hold_verified_;
+    const bool strictly_accepted =
         maximum_effort_stddev <= preflight_max_effort_stddev_ &&
-        gravity_capacity_valid;
+        gravity_capacity_valid &&
+        (hold_validation_valid ||
+         (math::gravityValidationAccepted(
+              validation, model_minimum_validation_joints_,
+              model_minimum_alignment_, model_minimum_scale_,
+              model_maximum_scale_, model_maximum_residual_) &&
+          model_error_allows_entry));
     const bool warning_accepted =
         !strictly_accepted && allow_model_validation_warning_ &&
         gravity_calibration_verified_ &&
         maximum_effort_stddev <= preflight_max_effort_stddev_ &&
+        model_error_allows_entry &&
         gravity_capacity_valid &&
         math::gravityValidationWarningAccepted(
             validation, minimum_warning_alignment_, model_minimum_scale_,
@@ -790,6 +1400,15 @@ private:
            << "，反馈/模型比例=" << validation.scale_estimate
            << "，归一化残差=" << validation.normalized_residual
            << "，最大力矩波动=" << maximum_effort_stddev << " Nm"
+           << "，最大模型误差=" << model_error.maximum_absolute_error
+           << " Nm（J" << model_error.joint + 1 << "，门限 "
+           << preflight_max_model_error_ << " Nm"
+           << (controlled_hold_validation_
+                   ? "；受控保持验证有效"
+                   : (payload_hold_verified_
+                          ? "；实际保持验证已通过"
+                          : ""))
+           << "）"
            << "，重力容量="
            << (gravity_capacity_valid ? "通过" : "不足")
            << "（J" << limiting_joint + 1 << " 需求="
@@ -1409,13 +2028,22 @@ private:
     return true;
   }
 
-  bool enterFreedrive(const std::string& source, std::string& result) {
+  bool enterFreedrive(const std::string& source, std::string& result,
+                      bool* retryable = nullptr) {
+    if (retryable != nullptr) {
+      *retryable = false;
+    }
     if (freedrive_active_) {
       result = "零力拖拽已经处于 ACTIVE";
       return true;
     }
     if (transition_busy_ || exit_requested_) {
       result = "控制器正在切换，请等待当前切换结束";
+      return false;
+    }
+    if (refreshIncidentLockout()) {
+      result = incidentLockoutDetail();
+      setState("INCIDENT_LOCKOUT", result);
       return false;
     }
     if (!simulation_ && !allow_hardware_freedrive_) {
@@ -1428,12 +2056,20 @@ private:
       setState("CALIBRATION_REQUIRED", result);
       return false;
     }
+    if (!payload_model_synchronized_) {
+      result = "拒绝进入：当前末端负载模型尚未同步到零力控制器";
+      setState("CALIBRATION_REQUIRED", result);
+      return false;
+    }
     if (!jointStateFresh()) {
       result = "拒绝进入：六轴 joint_states 缺失、不完整或已过期";
       return false;
     }
     if (maxAbsVelocity() > entry_velocity_limit_) {
       result = "拒绝进入：机械臂尚未静止";
+      if (retryable != nullptr) {
+        *retryable = true;
+      }
       return false;
     }
     if (!driverStateFresh()) {
@@ -1450,6 +2086,9 @@ private:
     if (!evaluateGravityPreflight(preflight_detail, &preflight_warning)) {
       publishValidation(preflight_detail);
       result = "拒绝进入：" + preflight_detail;
+      if (retryable != nullptr) {
+        *retryable = true;
+      }
       setState("READY", result);
       return false;
     }
@@ -1846,7 +2485,7 @@ private:
       if (!math::velocityScaleValid(scale, minimum_damping_scale_,
                                     maximum_damping_scale_)) {
         response.success = false;
-        response.message = "每轴阻尼倍率必须在 25% 到 200% 之间";
+        response.message = "每轴阻尼倍率必须在 5% 到 500% 之间";
         return true;
       }
     }
@@ -1906,7 +2545,10 @@ private:
       return false;
     }
 
-    std::ofstream output(record_file_, std::ios::out | std::ios::app);
+    const std::ios::openmode write_mode =
+        std::ios::out |
+        (point_count_ == 0 ? std::ios::trunc : std::ios::app);
+    std::ofstream output(record_file_, write_mode);
     if (!output) {
       result = "记录失败：无法写入 " + record_file_;
       return false;
@@ -1956,6 +2598,221 @@ private:
             << " 个姿态到 " << record_file_;
     result = message.str();
     state_detail_ = result;
+    publishState();
+    return true;
+  }
+
+  bool loadRecordedPoints(YAML::Node& records, std::string& error) const {
+    std::ifstream input(record_file_);
+    if (!input) {
+      records = YAML::Node(YAML::NodeType::Sequence);
+      return true;
+    }
+    std::ostringstream contents;
+    contents << input.rdbuf();
+    std::string yaml_text = contents.str();
+    std::string normalized;
+    const bool recovered_legacy =
+        normalizeLegacyPointYaml(yaml_text, normalized);
+    if (recovered_legacy) {
+      yaml_text = normalized;
+    }
+    try {
+      records = YAML::Load(yaml_text);
+    } catch (const YAML::Exception& exception) {
+      error = "姿态文件 YAML 解析失败：" + std::string(exception.what());
+      return false;
+    }
+    if (!records || records.IsNull()) {
+      records = YAML::Node(YAML::NodeType::Sequence);
+    }
+    if (!records.IsSequence()) {
+      error = "姿态文件根节点不是 YAML 列表：" + record_file_;
+      return false;
+    }
+    bool renumbered = false;
+    try {
+      for (std::size_t row = 0; row < records.size(); ++row) {
+        const std::uint32_t expected = static_cast<std::uint32_t>(row + 1);
+        const YAML::Node index = records[row]["index"];
+        if (index && index.as<std::uint32_t>() != expected) {
+          records[row]["index"] = expected;
+          renumbered = true;
+        }
+      }
+    } catch (const YAML::Exception& exception) {
+      error = "姿态序号解析失败：" + std::string(exception.what());
+      return false;
+    }
+    if (recovered_legacy) {
+      ROS_WARN_STREAM_ONCE(
+          "Recovered exact legacy artifacts in POINT YAML: " << record_file_);
+    }
+    if (renumbered) {
+      ROS_WARN_STREAM_ONCE(
+          "Normalized non-contiguous POINT indices in memory: " << record_file_);
+    }
+    return true;
+  }
+
+  bool listRecordedPointsCallback(
+      ListRecordedPoints::Request& request,
+      ListRecordedPoints::Response& response) {
+    (void)request;
+    response.record_file = record_file_;
+    YAML::Node records;
+    if (!loadRecordedPoints(records, response.message)) {
+      response.success = false;
+      return true;
+    }
+
+    try {
+      for (std::size_t row = 0; row < records.size(); ++row) {
+        const YAML::Node record = records[row];
+        const YAML::Node joints = record["joints_rad"];
+        if (!record["index"] || !record["stamp"] || !joints ||
+            !joints.IsMap()) {
+          std::ostringstream message;
+          message << "姿态文件第 " << row + 1 << " 条记录缺少必要字段";
+          response.success = false;
+          response.message = message.str();
+          return true;
+        }
+        response.indices.push_back(record["index"].as<std::uint32_t>());
+        response.stamps.push_back(record["stamp"].as<double>());
+        response.sources.push_back(
+            record["source"] ? record["source"].as<std::string>() : "未知来源");
+        for (const std::string& joint_name : expected_joint_names_) {
+          if (!joints[joint_name]) {
+            response.success = false;
+            response.message = "姿态记录缺少关节字段：" + joint_name;
+            return true;
+          }
+          response.joints_rad.push_back(joints[joint_name].as<double>());
+        }
+      }
+    } catch (const YAML::Exception& exception) {
+      response.success = false;
+      response.message = "姿态字段解析失败：" + std::string(exception.what());
+      return true;
+    }
+
+    response.success = true;
+    std::ostringstream message;
+    message << "已读取 " << records.size() << " 个姿态";
+    response.message = message.str();
+    return true;
+  }
+
+  bool writeRecordedPointsAtomically(const YAML::Node& records,
+                                     std::string& error) const {
+    YAML::Emitter emitter;
+    emitter.SetDoublePrecision(17);
+    emitter << records;
+    if (!emitter.good()) {
+      error = "无法生成姿态 YAML：" + emitter.GetLastError();
+      return false;
+    }
+
+    const std::string temporary_file = record_file_ + ".tmp";
+    std::ofstream output(temporary_file, std::ios::out | std::ios::trunc);
+    if (!output) {
+      error = "无法创建姿态临时文件：" + temporary_file;
+      return false;
+    }
+    output << "# Elfin freedrive POINT records. Joint values are radians.\n";
+    output << emitter.c_str() << "\n";
+    output.flush();
+    if (!output) {
+      output.close();
+      std::remove(temporary_file.c_str());
+      error = "写入姿态临时文件时发生 I/O 错误";
+      return false;
+    }
+    output.close();
+    if (std::rename(temporary_file.c_str(), record_file_.c_str()) != 0) {
+      const int rename_error = errno;
+      std::remove(temporary_file.c_str());
+      error = "无法原子替换姿态文件：" +
+              std::string(std::strerror(rename_error));
+      return false;
+    }
+    return true;
+  }
+
+  bool deleteRecordedPointCallback(
+      DeleteRecordedPoint::Request& request,
+      DeleteRecordedPoint::Response& response) {
+    YAML::Node records;
+    if (!loadRecordedPoints(records, response.message)) {
+      response.success = false;
+      response.remaining_count = point_count_;
+      return true;
+    }
+
+    if (request.index == 0) {
+      YAML::Node empty_records(YAML::NodeType::Sequence);
+      if (!writeRecordedPointsAtomically(empty_records, response.message)) {
+        response.success = false;
+        response.remaining_count = point_count_;
+        return true;
+      }
+      const std::size_t deleted_count = records.size();
+      point_count_ = 0;
+      publishPointCount();
+      response.success = true;
+      response.remaining_count = 0;
+      response.message = "已删除全部 " + std::to_string(deleted_count) +
+                         " 个 POINT 姿态";
+      state_detail_ = response.message;
+      publishState();
+      return true;
+    }
+
+    YAML::Node retained(YAML::NodeType::Sequence);
+    bool found = false;
+    try {
+      for (std::size_t row = 0; row < records.size(); ++row) {
+        const YAML::Node record = records[row];
+        const std::uint32_t index =
+            record["index"] ? record["index"].as<std::uint32_t>() : 0;
+        if (index == request.index) {
+          found = true;
+          continue;
+        }
+        YAML::Node copy = YAML::Clone(record);
+        copy["index"] = static_cast<std::uint32_t>(retained.size() + 1);
+        retained.push_back(copy);
+      }
+    } catch (const YAML::Exception& exception) {
+      response.success = false;
+      response.message = "删除前解析姿态失败：" +
+                         std::string(exception.what());
+      response.remaining_count = point_count_;
+      return true;
+    }
+    if (!found) {
+      response.success = false;
+      response.message = "未找到序号为 " + std::to_string(request.index) +
+                         " 的姿态，请先刷新列表";
+      response.remaining_count = point_count_;
+      return true;
+    }
+    if (!writeRecordedPointsAtomically(retained, response.message)) {
+      response.success = false;
+      response.remaining_count = point_count_;
+      return true;
+    }
+
+    point_count_ = static_cast<std::uint32_t>(retained.size());
+    publishPointCount();
+    response.success = true;
+    response.remaining_count = point_count_;
+    std::ostringstream message;
+    message << "已删除姿态 " << request.index << "，剩余 "
+            << point_count_ << " 个；其余序号已连续重排";
+    response.message = message.str();
+    state_detail_ = response.message;
     publishState();
     return true;
   }
@@ -2010,6 +2867,13 @@ private:
     if (!read_di_client_.call(service)) {
       online.data = false;
       button_online_pub_.publish(online);
+      const ToolButtonLogic::Events lost = button_logic_.inputUnavailable();
+      physical_free_entry_pending_ = false;
+      if (lost.free_released && (freedrive_active_ || exit_requested_)) {
+        std::string result;
+        beginControlledExit("实体 FREE 输入丢失",
+                            "DI bit 5 状态无法继续确认", true, result);
+      }
       return;
     }
     online.data = true;
@@ -2020,7 +2884,21 @@ private:
     raw_message.data = raw;
     raw_di_pub_.publish(raw_message);
 
-    const ToolButtonLogic::Events events = button_logic_.update(raw);
+    const ToolButtonLogic::Events events =
+        button_logic_.update(raw, steadySeconds());
+    const bool free_raw_high =
+        ((raw >> ToolButtonLogic::kFreeBit) & 0x1U) != 0;
+    if (events.free_short_pulse) {
+      std::ostringstream detail;
+      detail << "已忽略实体 FREE 短脉冲：观测高电平 " << std::fixed
+             << std::setprecision(3) << events.free_high_seconds << "/"
+             << button_logic_.requiredFreePressSeconds() << " 秒，"
+             << events.free_high_samples << "/"
+             << button_logic_.requiredFreePressSamples()
+             << " 个有效高电平样本；未切入力矩模式";
+      ROS_WARN_STREAM(detail.str());
+      setState(state_, detail.str());
+    }
     if (events.point_pressed) {
       std::string result;
       const bool success = recordPoint("实体 POINT (DI bit 4)", result);
@@ -2028,27 +2906,57 @@ private:
         setState(state_, result);
       }
     }
-    if (events.free_pressed) {
+    if (events.free_released) {
+      physical_free_entry_pending_ = false;
+      if (freedrive_active_ || exit_requested_) {
+        std::string result;
+        beginControlledExit("实体 FREE 松开", "实体保持输入已释放", true,
+                            result);
+      }
+    }
+    const double now_seconds = steadySeconds();
+    const bool should_attempt_entry =
+        events.free_pressed ||
+        (physical_free_entry_pending_ && events.free_confirmed_held &&
+         free_raw_high &&
+         now_seconds - last_physical_free_entry_attempt_seconds_ >= 0.20);
+    if (should_attempt_entry) {
+      last_physical_free_entry_attempt_seconds_ = now_seconds;
       std::string result;
-      const bool success = enterFreedrive("实体 FREE (DI bit 5)", result);
+      bool retryable = false;
+      const bool success = enterFreedrive("实体 FREE (DI bit 5)", result,
+                                          &retryable);
+      physical_free_entry_pending_ = !success && retryable &&
+                                     events.free_confirmed_held &&
+                                     free_raw_high;
       if (!success) {
         setState(state_, result);
       }
-    }
-    if (events.free_released && (freedrive_active_ || exit_requested_)) {
-      std::string result;
-      requestExit("实体 FREE 松开", result);
     }
   }
 
   void monitorTimerCallback(const ros::WallTimerEvent& event) {
     (void)event;
+    const ros::WallTime monitor_now = ros::WallTime::now();
+    if (!payload_model_synchronized_ && !freedrive_active_ &&
+        !transition_busy_ &&
+        (last_payload_sync_attempt_.isZero() ||
+         (monitor_now - last_payload_sync_attempt_).toSec() >= 1.0)) {
+      last_payload_sync_attempt_ = monitor_now;
+      synchronizePayloadModel();
+    }
     if (position_recovery_pending_) {
       recoverPositionController();
       publishState();
       return;
     }
     if (freedrive_active_) {
+      if (refreshIncidentLockout() &&
+          (!exit_requested_ || !exit_protective_)) {
+        std::string result;
+        beginControlledExit("事故锁", incidentLockoutDetail(), true, result);
+        return;
+      }
       if (!jointStateFresh()) {
         emergencyFallback("零力拖拽期间 joint_states 过期");
         return;
@@ -2076,6 +2984,8 @@ private:
       if (controller_status_received_ &&
           (controller_status_ == kStatusSolverError ||
            controller_status_ == kStatusSafetyStop ||
+           controller_status_ == kStatusHardLimit ||
+           controller_status_ == kStatusOverspeed ||
            controller_status_ == kStatusModelMismatch ||
            controller_status_ == kStatusGravityCapacity) &&
           (!exit_requested_ || !exit_protective_)) {
@@ -2086,8 +2996,12 @@ private:
           reason = "入口保持力矩与重力模型方向或量级不一致";
         } else if (controller_status_ == kStatusGravityCapacity) {
           reason = "当前姿态所需重力补偿超过零力控制器的保留容量";
+        } else if (controller_status_ == kStatusHardLimit) {
+          reason = "控制器检测到关节继续向硬限位运动";
+        } else if (controller_status_ == kStatusOverspeed) {
+          reason = "控制器检测到关节速度超过硬上限";
         } else {
-          reason = "控制器触发硬限位/超速保护";
+          reason = "控制器触发通用安全停止";
         }
         std::string result;
         beginControlledExit("控制器保护", reason, true, result);
@@ -2147,7 +3061,9 @@ private:
         return;
       }
     }
-    if (!simulation_ && !allow_hardware_freedrive_) {
+    if (refreshIncidentLockout()) {
+      setState("INCIDENT_LOCKOUT", incidentLockoutDetail());
+    } else if (!simulation_ && !allow_hardware_freedrive_) {
       setState("LOCKED",
                "零力控制器已加载但真机入口锁定；POINT 记录仍可使用");
     } else if (!simulation_ && !gravity_calibration_verified_) {
@@ -2243,6 +3159,7 @@ private:
   bool simulation_;
   bool allow_hardware_freedrive_;
   bool poll_tool_buttons_;
+  double free_press_hold_seconds_;
   double joint_state_timeout_;
   double driver_state_timeout_;
   double controller_status_timeout_;
@@ -2260,6 +3177,7 @@ private:
   double preflight_velocity_limit_;
   double preflight_position_tolerance_;
   double preflight_max_effort_stddev_;
+  double preflight_max_model_error_;
   bool allow_model_validation_warning_;
   double minimum_warning_alignment_;
   double minimum_damping_scale_;
@@ -2281,17 +3199,36 @@ private:
   std::string trial_log_directory_;
   std::string calibration_samples_file_;
   std::string calibration_candidate_file_;
+  std::string payload_profile_file_;
+  std::string freedrive_lockout_file_;
   std::vector<std::string> expected_joint_names_;
   std::vector<double> velocity_hard_limits_;
   std::vector<double> damping_scales_;
 
   bool gravity_model_ready_;
   bool gravity_calibration_verified_;
+  double maximum_payload_mass_;
+  payload::Model payload_model_;
+  std::string payload_profile_name_;
+  double payload_fit_rmse_;
+  double payload_fit_max_error_;
+  double payload_validation_drift_;
+  std::uint32_t payload_sample_count_;
+  bool payload_model_synchronized_;
+  bool controlled_hold_validation_;
+  bool payload_hold_verified_;
+  bool incident_lockout_latched_;
   std::string gravity_model_error_;
   KDL::Chain gravity_chain_;
   std::unique_ptr<KDL::ChainDynParam> gravity_dynamics_;
+  std::unique_ptr<KDL::ChainJntToJacSolver> payload_jacobian_solver_;
+  std::unique_ptr<KDL::ChainFkSolverPos_recursive> payload_fk_solver_;
+  KDL::Vector gravity_vector_;
   KDL::JntArray gravity_q_;
   KDL::JntArray gravity_effort_;
+  KDL::Jacobian payload_jacobian_;
+  payload::Regressor payload_regressor_;
+  payload::JointEffort current_payload_effort_;
   std::vector<std::size_t> gravity_joint_to_chain_;
   std::vector<double> gravity_joint_scales_;
   std::vector<double> gravity_bias_;
@@ -2326,6 +3263,8 @@ private:
   bool exit_protective_;
   bool transition_busy_;
   bool position_recovery_pending_;
+  bool physical_free_entry_pending_;
+  double last_physical_free_entry_attempt_seconds_;
   bool idle_initialized_;
   unsigned int stable_exit_samples_;
   std::uint64_t trial_log_rows_;
@@ -2348,6 +3287,7 @@ private:
   ros::WallTime exit_requested_wall_;
   ros::WallTime last_exit_switch_attempt_;
   ros::WallTime last_preflight_publish_wall_;
+  ros::WallTime last_payload_sync_attempt_;
 
   ros::ServiceClient switch_client_;
   ros::ServiceClient list_client_;
@@ -2357,6 +3297,7 @@ private:
   ros::ServiceClient settle_client_;
   ros::ServiceClient velocity_scale_client_;
   ros::ServiceClient damping_scales_client_;
+  ros::ServiceClient payload_model_client_;
   ros::Subscriber joint_state_sub_;
   ros::Subscriber servo_sub_;
   ros::Subscriber fault_sub_;
@@ -2376,12 +3317,19 @@ private:
   ros::Publisher velocity_scale_pub_;
   ros::Publisher velocity_hard_limits_pub_;
   ros::Publisher damping_scales_pub_;
+  ros::Publisher payload_profile_pub_;
+  ros::Publisher payload_model_pub_;
   ros::ServiceServer set_freedrive_server_;
   ros::ServiceServer record_point_server_;
+  ros::ServiceServer list_recorded_points_server_;
+  ros::ServiceServer delete_recorded_point_server_;
   ros::ServiceServer record_gravity_sample_server_;
   ros::ServiceServer fit_gravity_calibration_server_;
   ros::ServiceServer set_velocity_scale_server_;
   ros::ServiceServer set_damping_scales_server_;
+  ros::ServiceServer set_payload_model_server_;
+  ros::ServiceServer get_payload_model_server_;
+  ros::ServiceServer evaluate_payload_model_server_;
   ros::WallTimer button_timer_;
   ros::WallTimer monitor_timer_;
 };

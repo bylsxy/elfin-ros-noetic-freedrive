@@ -1,0 +1,13 @@
+---
+bool success
+string message
+string profile_name
+float64 mass
+float64[3] center_of_mass
+float64 fit_rmse
+float64 fit_max_error
+float64 validation_drift
+uint32 sample_count
+bool hold_verified
+bool synchronized
+string profile_file

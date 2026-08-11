@@ -48,7 +48,7 @@ sudo /opt/ros/noetic/bin/slaveinfo eth1
 
 ```bash
 source /opt/ros/noetic/setup.bash
-source /home/jetson/ros_ws/devel/setup.bash
+source /home/catas/ros_ws/devel/setup.bash
 roslaunch elfin_robot_bringup elfin5_bringup.launch
 ```
 
@@ -57,7 +57,7 @@ roslaunch elfin_robot_bringup elfin5_bringup.launch
 安全初始化补丁已使用以下命令单包编译通过：
 
 ```bash
-cd /home/jetson/ros_ws
+cd /home/catas/ros_ws
 source /opt/ros/noetic/setup.bash
 catkin_make --pkg elfin_ros_control
 ```
@@ -84,7 +84,7 @@ catkin_make --pkg elfin_ros_control
 
 ```bash
 # 终端 A；自动检测接口，加载模型并以 Servo Off 启动 RR 10 硬件栈
-/home/jetson/START_ELFIN_HARDWARE.sh
+/home/catas/START_ELFIN_HARDWARE.sh
 ```
 
 实测结果：
@@ -106,7 +106,7 @@ catkin_make --pkg elfin_ros_control
 在独立终端中预先输入下面的命令但先不要按回车；需要停机时立即按回车：
 
 ```bash
-/home/jetson/STOP_ELFIN.sh
+/home/catas/STOP_ELFIN.sh
 ```
 
 脚本按以下顺序处理：

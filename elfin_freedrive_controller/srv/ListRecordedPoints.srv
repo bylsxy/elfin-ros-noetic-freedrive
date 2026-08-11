@@ -1,0 +1,8 @@
+---
+bool success
+string message
+string record_file
+uint32[] indices
+float64[] stamps
+string[] sources
+float64[] joints_rad

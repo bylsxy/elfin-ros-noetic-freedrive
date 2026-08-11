@@ -39,6 +39,9 @@ Created on Mon Sep 17 10:31:06 2018
 
 #include <elfin_ethercat_driver/elfin_ethercat_driver.h>
 
+#include <iomanip>
+#include <sstream>
+
 namespace elfin_ethercat_driver {
 
 ElfinEtherCATDriver::ElfinEtherCATDriver(EtherCatManager *manager, std::string driver_name, const ros::NodeHandle &nh):
@@ -250,6 +253,38 @@ ElfinEtherCATDriver::ElfinEtherCATDriver(EtherCatManager *manager, std::string d
 
 ElfinEtherCATDriver::~ElfinEtherCATDriver()
 {
+    // A normal ROS shutdown destroys the hardware interface while the
+    // EtherCAT manager and its cyclic worker are still alive. Request CiA 402
+    // Shutdown for both axes of every module before releasing the clients so a
+    // Ctrl-C cannot leave operation-enabled drives behind.
+    if(!ethercat_clients_.empty())
+    {
+        ROS_WARN("Elfin EtherCAT driver is shutting down; requesting Servo Off for every module");
+        for(int i=0; i<ethercat_clients_.size(); i++)
+        {
+            if(ethercat_clients_[i]!=NULL)
+                ElfinEtherCATClient::setDisable((void *)ethercat_clients_[i]);
+        }
+
+        bool operation_enabled=true;
+        for(int attempt=0; attempt<50 && operation_enabled; attempt++)
+        {
+            operation_enabled=false;
+            for(int i=0; i<ethercat_clients_.size(); i++)
+            {
+                if(ethercat_clients_[i]!=NULL)
+                    operation_enabled=operation_enabled ||
+                                      ethercat_clients_[i]->hasOperationEnabledAxis();
+            }
+            if(operation_enabled)
+                usleep(10000);
+        }
+        if(operation_enabled)
+            ROS_ERROR("Servo Off could not be confirmed during normal EtherCAT driver shutdown");
+        else
+            ROS_INFO("Servo Off confirmed for all Elfin modules before EtherCAT shutdown");
+    }
+
     for(int i=0; i<ethercat_clients_.size(); i++)
     {
         if(ethercat_clients_[i]!=NULL)
@@ -599,15 +634,52 @@ bool ElfinEtherCATDriver::enableRobot_cb(std_srvs::SetBool::Request &req, std_sr
         return true;
     }
 
+    // Capture the actual CiA 402 states before rollback changes them. Surface
+    // this through the service so the Panel can distinguish an E-stop/power
+    // chain issue from one failed drive without searching rosout.
+    std::ostringstream diagnostics;
+    diagnostics << std::hex << std::setfill('0');
+    bool all_switch_on_disabled=true;
+    for(int i=0; i<ethercat_clients_.size(); i++)
+    {
+        const uint16_t status1 = static_cast<uint16_t>(
+            ethercat_clients_[i]->readInput_half_unit(
+                elfin_txpdo::AXIS1_STATUSWORD_L16, false));
+        const uint16_t status2 = static_cast<uint16_t>(
+            ethercat_clients_[i]->readInput_half_unit(
+                elfin_txpdo::AXIS2_STATUSWORD_L16, false));
+        const uint16_t error1 = static_cast<uint16_t>(
+            ethercat_clients_[i]->readInput_half_unit(
+                elfin_txpdo::AXIS1_ERRORCODE_L16, false));
+        const uint16_t error2 = static_cast<uint16_t>(
+            ethercat_clients_[i]->readInput_half_unit(
+                elfin_txpdo::AXIS2_ERRORCODE_L16, false));
+        all_switch_on_disabled=all_switch_on_disabled
+            && ((status1 & 0x006f) == 0x0060)
+            && ((status2 & 0x006f) == 0x0060);
+        diagnostics << " slave" << slave_no_[i]
+                    << " status=[0x" << std::setw(4) << status1
+                    << ",0x" << std::setw(4) << status2
+                    << "] error=[0x" << std::setw(4) << error1
+                    << ",0x" << std::setw(4) << error2 << "]";
+    }
+    if(all_switch_on_disabled)
+    {
+        diagnostics << "; all axes remain in CiA402 state 0x60 after controlword 0x0006"
+                    << " (check the common 48V/safety chain and E-stop reset;"
+                    << " no software safety condition was bypassed)";
+    }
+
     // Each setEnable thread waits for its own final status before returning.
     // If any module is not enabled after all joins, waiting longer cannot turn
     // that failed attempt into success. Roll every module back immediately.
     std_srvs::SetBool::Response disable_resp;
     disableRobot_cb(req, disable_resp);
     resp.success=false;
-    resp.message=disable_resp.success
-                 ? "robot is not enabled; partial enable was rolled back"
-                 : "robot is not enabled; partial enable rollback failed";
+    resp.message=(disable_resp.success
+                  ? "robot is not enabled; partial enable was rolled back;"
+                  : "robot is not enabled; partial enable rollback failed;")
+                 + diagnostics.str();
     return true;
 }
 

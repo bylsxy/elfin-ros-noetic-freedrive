@@ -1,0 +1,18 @@
+string profile_name
+float64 mass
+float64[3] center_of_mass
+float64 fit_rmse
+float64 fit_max_error
+float64 validation_drift
+uint32 sample_count
+bool persist
+# Only the automatic calibrator may request this for its <=1 s monitored hold.
+# It bypasses the position-mode absolute effort mismatch, not capacity, Fault,
+# joint-limit, controller-switch, velocity, or drift protections.
+bool controlled_hold_validation
+# True only after the automatic <=1 s motion-monitored hold passed.
+bool hold_verified
+---
+bool success
+string message
+string profile_file

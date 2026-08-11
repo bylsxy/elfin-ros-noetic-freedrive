@@ -17,6 +17,15 @@ elfin_freedrive_controller:
   gravity_scale: 1.0
   gravity_joint_scales: [1.0, 1.8307835762794629, 1.7616246212198707, 1.0, 1.0, 1.0]
   gravity_bias: [0.0, -0.45193016673879843, -0.19530071881191882, 0.0, 0.0, 0.0]
+  # The calibrated robot-body model above stays fixed. A rigid tool is added
+  # independently as mass + 3-D center of mass at elfin_end_link. The manager
+  # restores the last verified profile before it unlocks FREE.
+  payload_mass: 0.0
+  payload_center_of_mass: [0.0, 0.0, 0.0]
+  maximum_payload_mass: 5.0
+  # Long, light tools are bounded by predicted joint effort instead of an
+  # arbitrary center-distance cliff. Every candidate still has to pass the
+  # sampled path reserve, controlled hold, and per-cycle runtime capacity gate.
   # 2026-07-24: 17 passive CSP samples, 6 opposite-approach pose pairs.
   # J2/J3 leave-one-pose-out maximum errors: 0.507 / 1.159 Nm.
   gravity_calibration_verified: true
@@ -29,6 +38,10 @@ elfin_freedrive_controller:
   minimum_model_scale: 0.50
   maximum_model_scale: 2.0
   maximum_model_residual: 0.30
+  # Normal manual FREE entry still rejects a gross per-axis mismatch. The
+  # automatic payload calibrator may bypass only this position-mode value for
+  # its <=1 s motion-monitored hold because static friction depends on approach.
+  maximum_entry_effort_error: 5.0
   # A single pose cannot distinguish payload, friction and a human preload.
   # 2026-07-25 logs showed a stable hand preload shifting the estimate from
   # 0.544 to 1.201 and causing directional drift. Keep the validated multi-pose
@@ -37,17 +50,21 @@ elfin_freedrive_controller:
   minimum_adaptive_scale: 0.75
   maximum_adaptive_scale: 1.25
   handoff_duration: 0.5
+  # A settle request freezes the current support baseline. High damping blends
+  # continuously from the previous command over this short interval.
+  settle_handoff_duration: 0.10
   allow_model_validation_warning: true
   minimum_warning_alignment: 0.5
   effort_limit_scale: 0.20
   # J2 needs about 60-68 Nm around the 2026-07-25 high-load empty-arm pose.
-  # 84 Nm is still capped at 20% of the E05 URDF rating (420 Nm).
-  effort_limits: [15.0, 84.0, 30.0, 15.0, 8.0, 8.0]
+  # J3/J5 need 30.89/7.87 Nm on the measured 2026-07-26 tool path. These
+  # explicit limits remain below 20% of the E05 URDF ratings (40/13.8 Nm).
+  effort_limits: [15.0, 84.0, 36.0, 15.0, 10.0, 8.0]
   maximum_gravity_effort_fraction: 0.90
   damping: [1.2, 1.2, 0.8, 0.35, 0.18, 0.18]
   damping_scales: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
-  minimum_damping_scale: 0.25
-  maximum_damping_scale: 2.0
+  minimum_damping_scale: 0.05
+  maximum_damping_scale: 5.0
   settle_damping: [12.0, 12.0, 8.0, 4.0, 2.5, 2.5]
   friction: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
   friction_velocity: [0.05, 0.05, 0.05, 0.05, 0.05, 0.05]
@@ -56,9 +73,13 @@ elfin_freedrive_controller:
   velocity_hard_limits: [0.20, 0.20, 0.20, 0.30, 0.40, 0.40]
   velocity_limit_scale: 1.0
   minimum_velocity_limit_scale: 0.5
-  maximum_velocity_limit_scale: 2.0
+  maximum_velocity_limit_scale: 3.0
   limit_margin: 0.08
   hard_limit_margin: 0.02
+  # If FREE starts inside the hard-margin band, allow only motion away from
+  # the joint limit. Moving toward it or 0.003 rad deeper remains a hard stop.
+  hard_limit_toward_velocity: 0.02
+  hard_limit_inward_travel: 0.003
   limit_stiffness: 5.0
   limit_damping: 0.5
   velocity_limit_damping: 2.0
@@ -67,10 +88,15 @@ elfin_freedrive_controller:
 # The manager performs this passive check while the normal position controller
 # still owns the arm. It never releases a brake to identify gravity.
 elfin_freedrive_manager:
+  maximum_payload_mass: 5.0
+  # The incident's first-high to observed-low interval was 0.591681 s. Require
+  # 0.70 s plus eight high observations. One isolated low sample is filtered;
+  # a sustained low resets the candidate and can never accumulate later.
+  free_press_hold_seconds: 0.70
   velocity_hard_limits: [0.20, 0.20, 0.20, 0.30, 0.40, 0.40]
   velocity_limit_scale: 1.0
   minimum_velocity_limit_scale: 0.5
-  maximum_velocity_limit_scale: 2.0
+  maximum_velocity_limit_scale: 3.0
   entry_velocity_limit: 0.02
   exit_velocity_limit: 0.003
   exit_stable_samples_required: 10
@@ -82,11 +108,15 @@ elfin_freedrive_manager:
   preflight_velocity_limit: 0.003
   preflight_position_tolerance: 0.003
   preflight_max_effort_stddev: 2.0
+  # Normal manual FREE gate. During the automatic <=1 s candidate hold this is
+  # diagnostic only; actual drift/speed, capacity, Fault and limits remain hard.
+  preflight_max_model_error: 5.0
+  freedrive_lockout_file: /home/catas/.ros/ELFIN_FREEDRIVE_LOCKOUT
   allow_model_validation_warning: true
   minimum_warning_alignment: 0.5
   damping_scales: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
-  minimum_damping_scale: 0.25
-  maximum_damping_scale: 2.0
+  minimum_damping_scale: 0.05
+  maximum_damping_scale: 5.0
   calibration_min_samples: 6
   calibration_min_paired_poses: 5
   calibration_min_pose_separation: 0.08

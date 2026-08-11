@@ -1,0 +1,10 @@
+float64 forward
+float64 strafe
+float64 vertical
+float64 yaw
+float64 pitch
+float64 roll
+string camera_frame
+---
+bool success
+string message

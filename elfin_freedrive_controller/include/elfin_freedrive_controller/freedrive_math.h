@@ -38,6 +38,23 @@ inline double interpolate(double start, double end, double progress) {
   return start + (end - start) * clamp(progress, 0.0, 1.0);
 }
 
+inline double settlingHandoffCommand(double entry_command,
+                                     double settling_target,
+                                     double elapsed,
+                                     double duration) {
+  if (!std::isfinite(duration) || duration <= 0.0) {
+    return settling_target;
+  }
+  return interpolate(entry_command, settling_target,
+                     smoothStep(elapsed / duration));
+}
+
+inline double transitionVelocityScale(double requested_scale,
+                                      bool transition_active) {
+  return transition_active ? std::min(requested_scale, 1.0)
+                           : requested_scale;
+}
+
 inline bool velocityScaleValid(double scale, double minimum,
                                double maximum) {
   return std::isfinite(scale) && std::isfinite(minimum) &&
@@ -54,6 +71,29 @@ inline bool gravityEffortHasCapacity(double requested_effort,
          std::abs(requested_effort) <= maximum_fraction * effort_limit;
 }
 
+inline bool hardLimitStopRequired(double position, double velocity,
+                                  double entry_position, double lower,
+                                  double upper, double hard_margin,
+                                  double toward_limit_velocity,
+                                  double inward_travel_tolerance) {
+  if (!std::isfinite(position) || !std::isfinite(velocity) ||
+      !std::isfinite(entry_position) || !std::isfinite(hard_margin) ||
+      !std::isfinite(toward_limit_velocity) ||
+      !std::isfinite(inward_travel_tolerance) || hard_margin <= 0.0 ||
+      toward_limit_velocity <= 0.0 || inward_travel_tolerance <= 0.0) {
+    return true;
+  }
+  if (std::isfinite(lower) && position <= lower + hard_margin) {
+    return position <= lower || velocity < -toward_limit_velocity ||
+           position < entry_position - inward_travel_tolerance;
+  }
+  if (std::isfinite(upper) && position >= upper - hard_margin) {
+    return position >= upper || velocity > toward_limit_velocity ||
+           position > entry_position + inward_travel_tolerance;
+  }
+  return false;
+}
+
 struct GravityValidation {
   bool sufficient_excitation = false;
   std::size_t excited_joints = 0;
@@ -62,6 +102,34 @@ struct GravityValidation {
   double scale_estimate = 0.0;
   double normalized_residual = std::numeric_limits<double>::infinity();
 };
+
+struct EffortModelError {
+  bool valid = false;
+  std::size_t joint = 0;
+  double maximum_absolute_error = std::numeric_limits<double>::infinity();
+};
+
+inline EffortModelError maximumAbsoluteEffortError(
+    const std::vector<double>& model,
+    const std::vector<double>& measured) {
+  EffortModelError result;
+  if (model.size() != measured.size() || model.empty()) {
+    return result;
+  }
+  result.maximum_absolute_error = 0.0;
+  for (std::size_t joint = 0; joint < model.size(); ++joint) {
+    if (!std::isfinite(model[joint]) || !std::isfinite(measured[joint])) {
+      return EffortModelError();
+    }
+    const double error = std::abs(measured[joint] - model[joint]);
+    if (error > result.maximum_absolute_error) {
+      result.maximum_absolute_error = error;
+      result.joint = joint;
+    }
+  }
+  result.valid = true;
+  return result;
+}
 
 struct AffineGravityFit {
   bool valid = false;

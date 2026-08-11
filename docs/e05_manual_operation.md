@@ -7,23 +7,25 @@
 真机日常操作只需要记住两个启动入口，分别放在两个终端中：
 
 ```text
-终端 A：/home/jetson/START_ELFIN_HARDWARE.sh
+终端 A：/home/catas/START_ELFIN_HARDWARE.sh
              ↓ 等待找到 4 个 EtherCAT 从站且发布 /joint_states
-终端 B：/home/jetson/START_ELFIN_PANEL.sh
+终端 B：/home/catas/START_ELFIN_PANEL.sh
              ↓ 自动启动 MoveIt、Basic API 和 Control Panel
 ```
 
-只有准备做受监督的零力拖拽验证时，终端 A 才改为 `/home/jetson/START_ELFIN_HARDWARE.sh --freedrive`。这个参数只开放控制器门禁，不会自动 Servo On 或进入力矩模式。
+只有事故记录中的复验条件全部完成并正式解除锁定后，受监督的零力拖拽验证才可把终端 A 改为 `/home/catas/START_ELFIN_HARDWARE.sh --freedrive`。这个参数只开放控制器门禁，不会自动 Servo On 或进入力矩模式。
 
 需要 RViz 时，终端 B 改用：
 
 ```bash
-/home/jetson/START_ELFIN_PANEL.sh --rviz
+/home/catas/START_ELFIN_PANEL.sh --rviz
 ```
 
 不要单独运行 `roslaunch elfin_basic_api elfin_basic_api.launch`。Basic API 不是独立程序，它必须先拿到 MoveIt 的语义模型、`elfin_arm` 规划组和 planning scene 服务；单独启动正是 `Robot semantic description not found`、`Group 'elfin_arm' was not found` 和 `/get_planning_scene has not been advertised` 三类报错的原因。
 
 ## 1. 当前安全边界
+
+> **2026-07-26 事故状态：** 新末端仍使用 `0 kg` 模型时，DI bit 5 的一次非预期高电平触发了 FREE 和下坠。从首次读高到最终读低的日志间隔为 `0.59168 秒`，但旧单线程切换阻塞了中间采样，不能把它误称为精确电气脉宽。活动事故锁已于 2026-07-27 08:27:45 按用户明确指令解除并只读归档；`--freedrive` 不再因锁文件退出，但当前 `0 kg` 正式负载仍不匹配新末端。详见 [事故记录](e05_freedrive_incident_2026-07-26.md)。
 
 - 机械臂是 Han's Robot E05，ROS 版本为 Noetic。当前机器人接在 `eth1`，但启动脚本会按从站身份自动检测，不依赖固定网卡名。
 - 电闸可以作为最终物理断电手段，但首次运动时必须由一人专门守在电闸旁，且无需进入机械臂运动范围就能断电。
@@ -52,7 +54,7 @@
 
 ```bash
 source /opt/ros/noetic/setup.bash
-source /home/jetson/ros_ws/devel/setup.bash
+source /home/catas/ros_ws/devel/setup.bash
 ```
 
 命令运行后终端需要保持打开。`Ctrl+C` 用于关闭该终端中启动的 ROS 程序。
@@ -62,13 +64,13 @@ source /home/jetson/ros_ws/devel/setup.bash
 不要依赖文件管理器双击。首次真机实验前，在独立终端中先输入但不要按回车：
 
 ```bash
-/home/jetson/STOP_ELFIN.sh
+/home/catas/STOP_ELFIN.sh
 ```
 
 需要停机时按回车。也可以显式使用 Bash：
 
 ```bash
-bash /home/jetson/STOP_ELFIN.sh
+bash /home/catas/STOP_ELFIN.sh
 ```
 
 正常结果应包含：
@@ -85,10 +87,10 @@ Elfin hardware driver stopped.
 下面的脚本不会打开 EtherCAT，也不会控制真机：
 
 ```bash
-/home/jetson/TEST_ELFIN_OFFLINE.sh
+/home/catas/TEST_ELFIN_OFFLINE.sh
 ```
 
-它会编译完整 catkin 工作区，运行 freedrive 的按钮与数学单元测试（当前包共 `22 tests`），解析 E05 URDF，检查 Python 语法，并解析模型、硬件、Gazebo、MoveIt、Basic API 和 freedrive 的关键 launch 文件。最后出现 `PASS` 才算通过。
+它会编译完整 catkin 工作区，运行 freedrive 的按钮、重力模型、负载回归与安全数学单元测试，解析 E05 URDF，检查 Python 语法，并解析模型、硬件、Gazebo、MoveIt、Basic API 和 freedrive 的关键 launch 文件。最后出现 `PASS` 才算通过。
 
 它不能证明电机、EtherCAT、末端 I/O 或真实运动正常。
 
@@ -97,15 +99,15 @@ Elfin hardware driver stopped.
 仿真不会连接 EtherCAT 网口或真机。现在只需一个终端：
 
 ```bash
-/home/jetson/START_ELFIN_FREEDRIVE_SIM.sh
+/home/catas/START_ELFIN_FREEDRIVE_SIM.sh
 ```
 
 它会在回环地址的隔离 ROS/Gazebo 端口一次启动力矩仿真、MoveIt、Basic API 和 Panel；默认不打开 Gazebo/RViz 3D 窗口，以避开 Jetson 之前的 NVIDIA 图形崩溃。需要图形时选择：
 
 ```bash
-/home/jetson/START_ELFIN_FREEDRIVE_SIM.sh --gazebo-gui
-/home/jetson/START_ELFIN_FREEDRIVE_SIM.sh --rviz
-/home/jetson/START_ELFIN_FREEDRIVE_SIM.sh --rviz-egl
+/home/catas/START_ELFIN_FREEDRIVE_SIM.sh --gazebo-gui
+/home/catas/START_ELFIN_FREEDRIVE_SIM.sh --rviz
+/home/catas/START_ELFIN_FREEDRIVE_SIM.sh --rviz-egl
 ```
 
 关闭时在这个终端按一次 `Ctrl+C`，等待所有节点显示 `done`。不要使用 `gazebo --version` 检查版本；这台机器上的该命令会意外留下 Gazebo 后台进程。
@@ -121,14 +123,14 @@ Elfin hardware driver stopped.
 终端 A：自动识别机器人网口，以 RR 10 启动模型和 Servo-Off 硬件驱动。
 
 ```bash
-/home/jetson/START_ELFIN_HARDWARE.sh
+/home/catas/START_ELFIN_HARDWARE.sh
 ```
 
 终端 B：读取六轴、使能和故障状态。
 
 ```bash
 source /opt/ros/noetic/setup.bash
-source /home/jetson/ros_ws/devel/setup.bash
+source /home/catas/ros_ws/devel/setup.bash
 rostopic echo -n 1 /joint_states
 rostopic echo -n 1 /elfin_ros_control/elfin/enable_state
 rostopic echo -n 1 /elfin_ros_control/elfin/fault_state
@@ -137,7 +139,7 @@ rostopic echo -n 1 /elfin_ros_control/elfin/fault_state
 结束时先运行：
 
 ```bash
-/home/jetson/STOP_ELFIN.sh
+/home/catas/STOP_ELFIN.sh
 ```
 
 然后在终端 A 中按 `Ctrl+C`。
@@ -149,19 +151,19 @@ rostopic echo -n 1 /elfin_ros_control/elfin/fault_state
 开始前确认：机械臂空载或负载已固定、底座固定、工作范围和夹点清空、PE 正常，另有一人只负责上游电闸。先在停机终端输入下面这行但暂不回车：
 
 ```bash
-/home/jetson/STOP_ELFIN.sh
+/home/catas/STOP_ELFIN.sh
 ```
 
 终端 A 启动 Servo-Off 真机栈：
 
 ```bash
-/home/jetson/START_ELFIN_HARDWARE.sh
+/home/catas/START_ELFIN_HARDWARE.sh
 ```
 
 日常点动保持上面命令不变；只有按 8.3 节做零力拖拽验证时改成：
 
 ```bash
-/home/jetson/START_ELFIN_HARDWARE.sh --freedrive
+/home/catas/START_ELFIN_HARDWARE.sh --freedrive
 ```
 
 必须看到以下关键结果，且这个终端保持打开：
@@ -175,7 +177,7 @@ Started ['joint_state_controller'] successfully
 终端 B 启动完整控制界面：
 
 ```bash
-/home/jetson/START_ELFIN_PANEL.sh
+/home/catas/START_ELFIN_PANEL.sh
 ```
 
 它会先自动清除 rosmaster 中所有已无法响应的死亡节点注册，再检查机器人模型、新鲜的 `/joint_states`、仍真实存活的重复节点和真机 Servo 状态，然后一次启动 MoveIt、Basic API 和 Panel。硬件入口也会在已有 ROS master 时做同样清理。只有同名节点仍能响应健康检查时才会拒绝重复启动。必须等到：
@@ -187,14 +189,14 @@ Ready to take commands for planning group elfin_arm.
 如果还要 RViz，关闭终端 B 后重新使用：
 
 ```bash
-/home/jetson/START_ELFIN_PANEL.sh --rviz
+/home/catas/START_ELFIN_PANEL.sh --rviz
 ```
 
 首次 Servo On 前在第三个终端核对：
 
 ```bash
 source /opt/ros/noetic/setup.bash
-source /home/jetson/ros_ws/devel/setup.bash
+source /home/catas/ros_ws/devel/setup.bash
 rostopic echo -n 1 /elfin_ros_control/elfin/enable_state
 rostopic echo -n 1 /elfin_ros_control/elfin/fault_state
 rostopic echo -n 1 /joint_states
@@ -218,21 +220,23 @@ Panel 速度默认 1%、可调到 100%。100% 对应关节点动基准速度约 
 | `Rx/Ry/Rz +/-` | 末端绕 `Ref. link` 坐标系三轴持续旋转；按住继续、松开停止，直到 IK、碰撞检查或真实关节限位不再允许该方向；显示栏的 `R/P/Y` 是当前姿态角 |
 | `点动速度倍率` | 调整 Panel/Basic API 产生的轨迹速度倍率，不控制 RViz 内单独的 MoveIt 速度倍率 |
 | `DO0..DO2` | 分别对应实体 `OUTPUT_0..2`；读取原寄存器、只切换选中位、写后回读 |
-| `DI0..DI2` | 分别只读显示实体 `INPUT_0..2`；浮空输入应为 OFF |
+| `DI0..DI2` | 分别只读显示实体 `INPUT_0..2`；浮空输入应为 OFF；首次读取只建立基线，之后 ON/OFF 变化会在会话日志追加一条“结果：完成”记录 |
 | `POINT（DI bit 4）` | 按下沿把时间与 J1..J6 弧度持久写入 `~/.ros/elfin_freedrive_points.yaml`；不发送轨迹 |
-| `FREE（DI bit 5）` | 新的按下沿立即请求从位置保持切到有界重力补偿；松开后等待静止并在新位置恢复保持；绝不松抱闸 |
-| `进入零力拖拽` | 与实体 FREE 共用同一管理器和所有门禁；真机未用 `--freedrive` 启动时会明确拒绝 |
+| `FREE（DI bit 5）` | 从首次读高起至少 0.70 秒且至少 8 个 10 Hz 高电平样本后才请求切换；一次孤立低电平毛刺会被过滤，持续低电平会清空候选；确认松开后按 1 秒保护退出；绝不松抱闸 |
+| `进入零力拖拽` | 与实体 FREE 共用同一管理器和所有门禁；事故锁已解除，但当前负载模型、六轴误差、容量、Servo/Fault 等检查仍可拒绝请求 |
 | `退出并保持当前位置` | 与松开实体 FREE 相同；无法恢复位置控制时执行保护回退，真机最终请求 Servo Off |
-| `拖拽速度保护` | 在 50%--200% 间缩放六轴软减速与超速退出阈值；退出拖拽后设置，下一次进入生效 |
-| `六轴拖拽阻尼` | J1--J6 独立设置 25%--200% 的速度阻尼；降低会更轻，也更容易快速运动，不改变重力补偿 |
-| `现在记录当前姿态` | 与实体 POINT 共用同一持久记录功能；记录离散姿态，不是连续轨迹 |
+| `FREE 上限` | 稳定拖拽时可在 50%--300% 间缩放软/硬速度阈值；接管和退出阶段大于 100% 的部分不生效 |
+| `拖拽高级` | 查看六轴实际速度阈值、重力预检、CSV 和当前负载；J1--J6 阻尼可调，并提供高位一键未知末端标定 |
+| `姿态管理` | 逐条查看、记录、删除 POINT 姿态，并直接显示管理器实际使用的 YAML 路径 |
 | `设置坐标系` | 修改笛卡尔点动的参考坐标系和末端坐标系；普通使用保持默认值 |
 | `维护与接口诊断` | 打开受保护抱闸控制和只读 ROS/驱动诊断；不是普通运动区 |
-| `最近结果 / 错误详情` | 完整换行、滚动显示最近一次服务调用、按键识别或停止原因 |
+| `会话事件日志` | 按时间持续追加动作、结果、状态、Fault 和 FREE 退出原因；新内容不会覆盖旧内容 |
 
-每个操作按钮旁边都有中文作用和风险说明，鼠标悬停还会显示补充提示。主窗口可缩放；内容超过屏幕时使用滚动条，不再把界面锁死在 `700 x 720`。
+主界面沿用原始 GitHub Panel 的固定密度：六关节、六维末端、接管与输出、状态与输入分别形成紧凑矩形模块，常用操作在 `1366 x 768` 内无需滚动。可见文字只保留动作和状态，完整用途放在鼠标悬停提示中；危险抱闸、姿态管理和高级诊断分别进入独立窗口。
 
-本机固定映射为 `DI bit 4 = POINT`、`DI bit 5 = FREE`，它们与外接端子 `INPUT_0..2` 分开。POINT 每次按下持久记录一次；FREE 的新按下沿立即请求进入，松开请求退出。管理器启动时若 FREE 已按住也不会误触发，必须先释放再重新按下。拖拽始终保持 Servo On 和抱闸正常工作，不会调用维护区的松抱闸服务。完整设计见 `elfin_freedrive_controller/README.md`。
+POINT 默认保存在 `/home/catas/.ros/elfin_freedrive_points.yaml`；若 launch 覆盖了路径，“姿态管理”顶部会显示真实文件位置。它通过 `/elfin_freedrive_manager/list_recorded_points` 读取全部记录，通过 `/elfin_freedrive_manager/delete_recorded_point` 原子删除选中记录并连续重排序号。
+
+本机固定映射为 `DI bit 4 = POINT`、`DI bit 5 = FREE`，它们与外接端子 `INPUT_0..2` 分开。POINT 每次按下持久记录一次；FREE 必须从首次读高起同时满足 0.70 秒和 8 次连续采样才请求进入，任一条件不足都不会切换，松开请求保护退出。管理器启动时若 FREE 已按住也不会误触发，必须先释放再重新按下；已确认 FREE 后若 I/O 读取丢失，也会退出并等待低电平重新武装。拖拽始终保持 Servo On 和抱闸正常工作，不会调用维护区的松抱闸服务。完整设计见 `elfin_freedrive_controller/README.md`。
 
 `维护与接口诊断` 会打开可缩放的维护窗口：
 
@@ -250,23 +254,33 @@ Panel 速度默认 1%、可调到 100%。100% 对应关节点动基准速度约 
 
 当前 MoveIt 场景尚未包含实验桌、墙面、相机支架等真实环境几何体。它能检查机器人自身和已加入 planning scene 的物体，但不会凭空知道桌子在哪里；Panel 的关节点动也不能替代现场观察。获得桌面尺寸和相对机器人基座的位姿后，应把桌子加入碰撞场景，再依赖 MoveIt 做环境避碰。
 
-### 8.3 第一次真机零力拖拽验证
+### 8.3 真机零力拖拽复验（事故锁已解除，仍需受支持负载）
 
-2026-07-24 已完成空载多姿态重力标定和旧版真机静态 CST 验收：17 个原始样本、6 组相反到达方向的姿态，4 秒试验覆盖当时完整 3 秒交接。当前已改成 FREE 按下立即请求和 0.5 秒接管；2026-07-25 人工拖动日志又证明单姿态入口微调会误学人手预载，因此已经默认关闭。固定模型版本必须重新做空载小范围验证，不能直接沿用旧时序结论。
+2026-07-24 的空载静态 CST 和 2026-07-25 的人工拖动记录只证明旧负载、旧时序下的历史结果。活动事故锁已按用户指令解除，但当前正式负载仍为 `0 kg`。本次新末端候选已通过离线测量和容量复算，仍须先在 Panel 完成最多 1 秒的受监督保持验证并看到正式配置持久化，之后才执行日常人工拖拽。
 
-第一次人手试拖仍必须空载，姿态远离桌面、自碰撞和六轴限位；使用能承重但不主动牵拉的额定防坠支撑，清空扫掠区和夹点，另有一人只守上游电闸。
+某一新负载第一次人手试拖时，姿态必须远离桌面、自碰撞和六轴限位；使用能承重但不主动牵拉的额定防坠支撑，清空扫掠区和夹点，另有一人只守上游电闸。
 
-1. 终端 A 用 `/home/jetson/START_ELFIN_HARDWARE.sh --freedrive` 启动，确认 4 个从站和 `Freedrive manager gate: UNLOCKED`。
-2. 终端 B 启动 `/home/jetson/START_ELFIN_PANEL.sh`，保持点动速度 1%，正常 Servo On。
+1. 终端 A 用 `/home/catas/START_ELFIN_HARDWARE.sh --freedrive` 启动，确认 4 个从站和 `Freedrive manager gate: UNLOCKED`。
+2. 终端 B 启动 `/home/catas/START_ELFIN_PANEL.sh`，保持点动速度 1%，正常 Servo On。
 3. 保持机械臂静止且手先离开，查看 Panel“重力模型预检”。绿色为严格通过；黄色表示已标定模型在当前单姿态存在残差，但方向、比例、稳定性和力矩容量仍可接受；红色未通过不能绕过。
-4. 一只手在远离夹点、容易控制的连杆位置轻扶，点击“进入零力拖拽”或按住实体 FREE。实体按钮检测到新的按下沿就立即请求，不再等待 1 秒；切换后的 0.5 秒内不要预先蓄力猛拉。
+4. 一只手在远离夹点、容易控制的连杆位置轻扶，点击“进入零力拖拽”或持续按住实体 FREE。实体按钮从首次读高起连续确认至少 0.70 秒并取得至少 8 个样本后才请求，实际按住通常约 0.70--0.80 秒；切换后的 0.5 秒重力接管期间不要预先蓄力猛拉。
 5. 状态为 `ACTIVE` 后只轻推几毫米/几度，松手确认没有持续自行加速；随后退出并确认 `READY` 和当前位置保持。
 6. 读取 `/elfin_freedrive_controller/telemetry`、`/joint_states`、Fault、Panel 详情和最新 CSV。任何主动下坠、抬升、抖动、Fault、Servo Off 或通信过期都立即拉闸并停止验证。
 7. 小范围手推通过后，才逐步扩大拖动范围，最后验证实体 FREE 松开和 POINT 记录。
 
-当前先按 URDF 额定值的 20% 限制，再用 `[15, 84, 30, 15, 8, 8] Nm` 的显式每轴上限收紧；J2 的 `84 Nm` 仍等于额定 `420 Nm` 的 20%。模型重力达到任一上限 90% 会拒绝/退出。若手感偏重，先分析 trial CSV 和摩擦，不能直接提高上限。安装夹爪、相机、转接板或其他负载后，空载标定不再足以证明安全。
+当前先按 URDF 额定值的 20% 限制，再用 `[15, 84, 36, 15, 10, 8] Nm` 的显式每轴上限收紧；J3/J5 的 `36/10 Nm` 仍只有各自额定值的 `18%/14.5%`。模型重力达到任一上限 90% 会拒绝/退出。若手感偏重，先分析 trial CSV 和摩擦，不能直接提高上限。安装夹爪、相机、转接板或其他负载后，空载标定不再足以证明安全。
 
-Panel 的“拖拽速度保护”可在 `50%--200%` 调整超速退出阈值；“六轴拖拽阻尼”可把 J1--J6 分别设为 `25%--200%`。两者都只能在退出零力拖拽后应用，下一次进入生效。降低阻尼时一次只改一个轴，每次最多下降 10%--20%，先做几毫米试拖；阻尼不负责承重，重力错误应重新标定工具负载。
+Panel 的“FREE 上限”可在 `50%--300%` 调整稳定拖拽阶段的软减速和硬速度阈值；接管和退出阶段始终最多采用 100% 保护。“拖拽高级”可把 J1--J6 阻尼分别设为 `5%--500%`。两者都只能在退出零力拖拽后应用，下一次进入生效。降低阻尼时一次只改一个轴，每次最多下降 10%--20%，先做几毫米试拖；阻尼不负责承重，重力错误应重新标定工具负载。
+
+### 8.4 更换末端后自动标定负载
+
+更换夹爪、剪刀、相机、转接件、末端电机或线缆布置后，不能继续把空载模型当成正确重力。事故锁已经解除，但不会把不合格候选变成正式模型；只有负载几何、残差和力矩容量满足要求时，才可使用 `--freedrive` 进入最终保持验证。法兰应先用普通位置点动移到 `elfin_base` 的 `z >= 0.65 m`，再进入 Panel“拖拽高级”执行标定。
+
+2026-07-27 09:03 的 8/8 组样本得到 `1.241 kg`、重心半径 `0.461 m`，拟合/留出 RMSE 为 `0.97/0.78 Nm`，包含当前起点的整条路径峰值为 `82.5%`。重心半径 `0.60 m` 现在只作为扩展距离提示，不再按固定距离拒绝轻质长工具；逐路径容量才是控制资格硬检查，正式负载仍必须通过最多 1 秒真机保持验证。长工具的真实外形碰撞和线缆扫掠范围仍须另行确认。
+
+Panel 会先检查 Servo/Fault 状态是否在 0.75 秒内更新、FREE 是否为 `READY` 和当前法兰高度，再显示清场确认。完整标定会用普通位置控制完成高位双向采样；已有完整且末端未改变的样本可点击“复用最近样本，仅做短时验证”，避免重复 32 段运动。两条路径都只有在拟合、留出姿态、力矩容量和默认 0.8 秒且绝不超过 1 秒的零力保持全部通过后才持久化；中止或失败会请求恢复位置保持、旧负载和原阻尼。
+
+总负载必须不超过 E05 额定 5 kg，且未知实体在整段路径至少有 0.40 m 现场余量。MoveIt 看不到未建模夹爪、线缆和人员，柔性线缆也不一定能等效为固定重心，因此不能把“一键”理解成“任意未知物体绝对安全”。第一次操作步骤、输出文件和全部拒绝条件见 `docs/e05_automatic_payload_calibration.md`。
 
 ## 9. 碰撞或 Servo On 立即 Fault 时怎么恢复
 
@@ -275,7 +289,7 @@ Panel 的“拖拽速度保护”可在 `50%--200%` 调整超速退出阈值；�
 只要 ROS 和 EtherCAT 仍在线，立即运行：
 
 ```bash
-/home/jetson/RECOVER_ELFIN_COLLISION.sh
+/home/catas/RECOVER_ELFIN_COLLISION.sh
 ```
 
 脚本会按顺序执行：
@@ -289,7 +303,7 @@ Panel 的“拖拽速度保护”可在 `50%--200%` 调整超速退出阈值；�
 诊断记录保存在：
 
 ```text
-/home/jetson/elfin_recovery_reports/
+/home/catas/elfin_recovery_reports/
 ```
 
 如果脚本不能确认 Servo Off，立即拉上游电闸。如果机械臂仍压着桌子，先移走可移动的障碍；无法移走时必须像本次一样用额定吊具承重、约束可能扫动的关节并清空夹点，不能把“自动开全抱闸”写成日常恢复程序。
@@ -297,7 +311,7 @@ Panel 的“拖拽速度保护”可在 `50%--200%` 调整超速退出阈值；�
 机械接触已经解除或机械臂已被额定支撑后，可以只清一次 Fault：
 
 ```bash
-/home/jetson/RECOVER_ELFIN_COLLISION.sh --clear-fault
+/home/catas/RECOVER_ELFIN_COLLISION.sh --clear-fault
 ```
 
 这个选项仍然不会 Servo On 或运动。只有报告末尾同时满足 `enable_state=False`、`fault_state=False`、`get_motion_state success=False`（表示没有运动）、`get_pos_align_state success=True`，才回到 Panel，以 `1%` 短按正确的单关节退离方向。再次出现 Fault 就停止重试，检查 48 V 母线、公共安全/使能条件、抱闸供电和报告中的驱动状态。
@@ -319,7 +333,7 @@ Panel 的“拖拽速度保护”可在 `50%--200%` 调整超速退出阈值；�
 | `ABORTED: CONTROL_FAILED` | 轨迹控制器、Servo 或底层 Fault 导致执行失败；不是“规划成功就一定能动”。 |
 | `IK plugin ... deprecated API` | 兼容性警告，当前 IKFast 仍可用，不是本次启动失败。 |
 | `No 3D sensor plugin(s) defined for octomap updates` | 尚未接入深度相机到 MoveIt OctoMap；不妨碍无传感器规划，但也不会自动感知桌子。 |
-| RViz 无响应后 `exit code -9` | 本机 Apport 报告显示 RViz 先在 NVIDIA `libnvidia-glcore.so.35.3.1` 图形路径发生 `SIGSEGV`，之后用户关闭无响应窗口才出现 `-9`；不是 IK 警告，也没有 OOM/GPU reset 证据。先用默认低负载配置，仍复现再用 `--rviz-egl`。 |
+| RViz 在 `Constructing new MoveGroup connection` 后 `SIGSEGV`（常见为 `-11`，随后可能被记录为 `-9`） | 这是旧 `MotionPlanning` 插件在当前 Noetic/图形环境中的兼容性崩溃，不是 `solve_type` 或 IK 警告。默认 `--rviz` 和柑橘视觉配置已移除该插件；不要切换回 `--rviz-original`。只有纯图形初始化失败且日志没有 MoveGroup 连接时，才尝试 `--rviz-egl`。 |
 
 ## 11. 灯环与末端 I/O
 
@@ -348,35 +362,35 @@ rosservice call /elfin_ros_control/elfin/io_port1/read_do "data: true"
 
 ## 12. MoveIt/RViz 鼠标规划与姿态记录
 
-`START_ELFIN_PANEL.sh --rviz` 现在默认加载低负载配置：帧率 10 FPS，关闭未使用的 `/joy_pose` 显示、规划场景几何体显示和轨迹循环动画。它保留 MotionPlanning、交互标记、机器人模型、Plan 和 Execute 功能。
+`START_ELFIN_PANEL.sh --rviz` 现在默认加载低负载只读配置：帧率 10 FPS，关闭未使用的 `/joy_pose` 显示，并保留机器人模型、规划轨迹、语义 MarkerArray 和环境点云。它不加载 `moveit_rviz_plugin/MotionPlanning`，因此不会在 RViz 内部再次创建 MoveGroup 客户端；当前 Noetic 环境中，该插件在建立 `elfin_arm` 连接后可能触发 `SIGSEGV`。MoveIt 的规划器、轨迹执行节点和 Panel/柑橘视觉终端不受影响，规划与执行请通过这些终端完成。
 
 如果终端 B 没有使用 `--rviz`，硬件和 `move_group` 已运行时可以单独打开同一低负载 RViz：
 
 ```bash
 source /opt/ros/noetic/setup.bash
-source /home/jetson/ros_ws/devel/setup.bash
+source /home/catas/ros_ws/devel/setup.bash
 roslaunch elfin5_moveit_config moveit_rviz.launch config:=true
 ```
 
 如果再次出现 NVIDIA GLX 路径崩溃，先关闭原 Panel 启动终端，再使用 Qt EGL 备用路径：
 
 ```bash
-/home/jetson/START_ELFIN_PANEL.sh --rviz-egl
+/home/catas/START_ELFIN_PANEL.sh --rviz-egl
 ```
 
-原始较重配置仅用于比较问题，不作为日常默认：
+原始较重配置仍仅用于定位兼容性问题，不作为日常或实机默认；它保留 `MotionPlanning`，所以可能重新触发上述崩溃：
 
 ```bash
-/home/jetson/START_ELFIN_PANEL.sh --rviz-original
+/home/catas/START_ELFIN_PANEL.sh --rviz-original
 ```
 
-在 RViz 右侧 `MotionPlanning -> Planning` 中将 Planning Group 选为 `elfin_arm`。每次先把 Start State 设为 `current` 并点 `Update`；拖动橙色末端标记的箭头可平移目标，拖彩色圆环可旋转目标。`Plan` 只计算和动画预览，`Execute` 才让真机执行，`Plan & Execute` 会连续完成两步。也可以在 `Joints` 页用滑块设置六轴目标。RViz 的速度/加速度倍率独立于 Control Panel。
+只有在明确启动 `--rviz-original` 且确认该插件稳定时，右侧才会出现 `MotionPlanning -> Planning`。此时可将 Planning Group 选为 `elfin_arm`，先把 Start State 设为 `current` 并点 `Update`；拖动末端标记或使用 `Joints` 页可生成目标。`Plan` 只计算和动画预览，`Execute` 才会请求真机执行，`Plan & Execute` 会连续完成两步。日常使用优先通过 Panel/柑橘视觉终端的规划服务；任何真实执行仍须满足现有执行门禁和现场确认。
 
 系统自带 MoveIt Commander，可记录关键姿态并在重启后重新规划播放：
 
 ```bash
 source /opt/ros/noetic/setup.bash
-source /home/jetson/ros_ws/devel/setup.bash
+source /home/catas/ros_ws/devel/setup.bash
 rosrun moveit_commander moveit_commander_cmdline.py elfin_arm
 ```
 
@@ -386,8 +400,8 @@ rosrun moveit_commander moveit_commander_cmdline.py elfin_arm
 rec pose1
 rec pose2
 show
-save /home/jetson/elfin_positions.cmd
-load /home/jetson/elfin_positions.cmd
+save /home/catas/elfin_positions.cmd
+load /home/catas/elfin_positions.cmd
 plan pose1
 execute
 go pose2
@@ -407,7 +421,7 @@ stop
 - Gazebo 模型、两个控制器、MoveIt、Basic API 和 Control Panel 启动通过。
 - 仿真 J1 `0 -> 0.10 rad -> 0`，两次 MoveIt 执行均返回 `SUCCEEDED`。
 - 真机 EtherCAT 找到 4 个从站；Servo Off、无故障、静止、位置对齐和停机退出均已验证。
-- freedrive 新包测试覆盖按钮状态机、平滑接管、非有限输入、反向力矩、比例/残差拒绝、双向摩擦中心拟合和重力容量余量；其余旧包仍缺少系统化单元测试，不能把编译和冒烟通过理解成所有边界行为都已证明。
+- freedrive 新包测试覆盖按钮状态机、平滑接管、非有限输入、反向力矩、比例/残差拒绝、双向摩擦中心拟合、末端负载回归和重力容量余量；其余旧包仍缺少系统化单元测试，不能把编译和冒烟通过理解成所有边界行为都已证明。
 - 真机 Servo On、六轴 Panel 点动和 Servo Off 已成功。2026-07-20 曾对历史 `LED0` 位做寄存器写入/回读且未见灯光；本次电气审计证明它不能当作 E05 可控灯环接口，已从 Panel 删除。
 - MoveIt RViz 已连接真机，MoveIt Commander 的当前姿态记录、显示和文件保存已通过。
 - freedrive 旧版仿真曾验证 `READY -> ACTIVE -> READY`、六轴控制器互斥、3 秒平滑接管、J2 外力推动约 `0.18 rad`、退出后位置控制器恢复，以及 8 秒超时分支的原子回切。当前 0.5 秒接管、固定标定模型和 Panel 参数服务已经编译及单元测试通过，仍需补充修复后的真机小范围复验。

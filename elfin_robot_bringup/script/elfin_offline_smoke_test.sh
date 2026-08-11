@@ -2,7 +2,7 @@
 
 # Build and parse the Elfin stack without opening EtherCAT or commanding hardware.
 
-set -euo pipefail
+set -eo pipefail
 
 ROS_SETUP=/opt/ros/noetic/setup.bash
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -14,6 +14,7 @@ source "$ROS_SETUP"
 if [[ -r "$WORKSPACE/devel/setup.bash" ]]; then
     source "$WORKSPACE/devel/setup.bash"
 fi
+set -u
 
 echo "[1/6] Checking shell scripts..."
 for shell_script in \

@@ -1,0 +1,6 @@
+# 1-based POINT index. Use 0 to atomically delete all recorded POINT poses.
+uint32 index
+---
+bool success
+string message
+uint32 remaining_count

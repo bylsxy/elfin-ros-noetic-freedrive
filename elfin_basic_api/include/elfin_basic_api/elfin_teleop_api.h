@@ -52,6 +52,7 @@ Created on Mon Nov 13 15:20:10 2017
 #include <trajectory_msgs/JointTrajectoryPoint.h>
 #include <elfin_robot_msgs/SetInt16.h>
 #include <elfin_robot_msgs/SetFloat64.h>
+#include <elfin_robot_msgs/CockpitJog.h>
 #include <std_msgs/Empty.h>
 #include <std_srvs/SetBool.h>
 #include <std_msgs/Int64.h>
@@ -78,6 +79,7 @@ public:
 
     bool jointTeleop_cb(elfin_robot_msgs::SetInt16::Request &req, elfin_robot_msgs::SetInt16::Response &resp);
     bool cartTeleop_cb(elfin_robot_msgs::SetInt16::Request &req, elfin_robot_msgs::SetInt16::Response &resp);
+    bool cockpitJog_cb(elfin_robot_msgs::CockpitJog::Request &req, elfin_robot_msgs::CockpitJog::Response &resp);
     bool homeTeleop_cb(std_srvs::SetBool::Request &req, std_srvs::SetBool::Response &resp);
     bool teleopStop_cb(std_srvs::SetBool::Request &req, std_srvs::SetBool::Response &resp);
 
@@ -95,6 +97,7 @@ private:
 
     ros::ServiceServer joint_teleop_server_;
     ros::ServiceServer cart_teleop_server_;
+    ros::ServiceServer cockpit_jog_server_;
     ros::ServiceServer home_teleop_server_;
     ros::ServiceServer teleop_stop_server_;
 
