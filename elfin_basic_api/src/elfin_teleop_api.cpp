@@ -98,14 +98,26 @@ void ElfinTeleopAPI::teleopJointCmdNoLimitCB(const std_msgs::Int64ConstPtr &msg)
     if(msg->data==0 || abs(msg->data)>goal_.trajectory.joint_names.size())
         return;
     int joint_num=abs(msg->data);
-    int symbol;
-    if(joint_num==msg->data)
-        symbol=1;
-    else
-        symbol=-1;
-    trajectory_msgs::JointTrajectoryPoint point_tmp;
+    int symbol=(joint_num==msg->data) ? 1 : -1;
     std::vector<double> position_tmp=group_->getCurrentJointValues();
     position_tmp[joint_num-1]+=symbol*joint_step_;
+
+    planning_scene_monitor_->updateFrameTransforms();
+    planning_scene::PlanningSceneConstPtr plan_scene=
+        planning_scene_monitor_->getPlanningScene();
+    robot_state::RobotState kinematic_state=plan_scene->getCurrentState();
+    const robot_state::JointModelGroup* joint_model_group=
+        kinematic_state.getJointModelGroup(group_->getName());
+    kinematic_state.setJointGroupPositions(joint_model_group, position_tmp);
+    if(!kinematic_state.satisfiesBounds(joint_model_group) ||
+       plan_scene->isStateColliding(kinematic_state, group_->getName()))
+    {
+        ROS_WARN_THROTTLE(1.0,
+                          "Rejected legacy no-limit jog: bounds or attached-body collision");
+        return;
+    }
+
+    trajectory_msgs::JointTrajectoryPoint point_tmp;
     point_tmp.positions=position_tmp;
     point_tmp.time_from_start.nsec=joint_duration_ns_;
     goal_.trajectory.points.push_back(point_tmp);
@@ -153,13 +165,10 @@ bool ElfinTeleopAPI::jointTeleop_cb(elfin_robot_msgs::SetInt16::Request &req, el
 
     trajectory_msgs::JointTrajectoryPoint point_tmp;
 
-    robot_state::RobotStatePtr kinematic_state_ptr=group_->getCurrentState();
-    robot_state::RobotState kinematic_state=*kinematic_state_ptr;
-    const robot_state::JointModelGroup* joint_model_group = kinematic_state.getJointModelGroup(group_->getName());
-
     planning_scene_monitor_->updateFrameTransforms();
     planning_scene::PlanningSceneConstPtr plan_scene=planning_scene_monitor_->getPlanningScene();
-
+    robot_state::RobotState kinematic_state=plan_scene->getCurrentState();
+    const robot_state::JointModelGroup* joint_model_group = kinematic_state.getJointModelGroup(group_->getName());
     std::vector<double> position_tmp=position_current;
     bool collision_flag=false;
 
@@ -300,12 +309,10 @@ bool ElfinTeleopAPI::cartTeleop_cb(elfin_robot_msgs::SetInt16::Request &req, elf
     double resolution_alpha=resolution_angle_;
     double resolution_delta=resolution_linear_;
 
-    robot_state::RobotStatePtr kinematic_state_ptr=group_->getCurrentState();
-    robot_state::RobotState kinematic_state=*kinematic_state_ptr;
-    const robot_state::JointModelGroup* joint_model_group = kinematic_state.getJointModelGroup(group_->getName());
-
     planning_scene_monitor_->updateFrameTransforms();
     planning_scene::PlanningSceneConstPtr plan_scene=planning_scene_monitor_->getPlanningScene();
+    robot_state::RobotState kinematic_state=plan_scene->getCurrentState();
+    const robot_state::JointModelGroup* joint_model_group = kinematic_state.getJointModelGroup(group_->getName());
 
     trajectory_msgs::JointTrajectoryPoint point_tmp;
 
@@ -482,14 +489,12 @@ bool ElfinTeleopAPI::cockpitJog_cb(elfin_robot_msgs::CockpitJog::Request &req,
 
     geometry_msgs::PoseStamped current_pose=group_->getCurrentPose(end_link_);
     std::vector<double> current_joint_states=group_->getCurrentJointValues();
-    robot_state::RobotStatePtr kinematic_state_ptr=group_->getCurrentState();
-    robot_state::RobotState kinematic_state=*kinematic_state_ptr;
-    const robot_state::JointModelGroup* joint_model_group =
-        kinematic_state.getJointModelGroup(group_->getName());
-
     planning_scene_monitor_->updateFrameTransforms();
     planning_scene::PlanningSceneConstPtr plan_scene=
         planning_scene_monitor_->getPlanningScene();
+    robot_state::RobotState kinematic_state=plan_scene->getCurrentState();
+    const robot_state::JointModelGroup* joint_model_group =
+        kinematic_state.getJointModelGroup(group_->getName());
 
     trajectory_msgs::JointTrajectoryPoint point_tmp;
     bool ik_have_result=true;
@@ -623,12 +628,10 @@ bool ElfinTeleopAPI::homeTeleop_cb(std_srvs::SetBool::Request &req, std_srvs::Se
 
     trajectory_msgs::JointTrajectoryPoint point_tmp;
 
-    robot_state::RobotStatePtr kinematic_state_ptr=group_->getCurrentState();
-    robot_state::RobotState kinematic_state=*kinematic_state_ptr;
-    const robot_state::JointModelGroup* joint_model_group = kinematic_state.getJointModelGroup(group_->getName());
-
     planning_scene_monitor_->updateFrameTransforms();
     planning_scene::PlanningSceneConstPtr plan_scene=planning_scene_monitor_->getPlanningScene();
+    robot_state::RobotState kinematic_state=plan_scene->getCurrentState();
+    const robot_state::JointModelGroup* joint_model_group = kinematic_state.getJointModelGroup(group_->getName());
 
     std::vector<double> position_tmp=position_current;
     bool collision_flag=false;
